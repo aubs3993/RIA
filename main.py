@@ -72,13 +72,17 @@ def run(skip_download: bool, skip_scrape: bool, limit: int | None) -> int:
         attempted = limit if limit is not None else len(targeted)
         print(f"  firms scraped (attempted):      {attempted:,}")
         if not scraped_df.empty:
-            print(f"  total contact rows:             {len(scraped_df):,}")
+            has_email = scraped_df["contact_email"].notna() & (scraped_df["contact_email"] != "")
+            email_rows = scraped_df[has_email]
+            print(f"  total output rows:              {len(scraped_df):,}")
+            print(f"  rows with an email:             {len(email_rows):,}")
+            print(f"  firms kept w/o email:           {(~has_email).sum():,}")
             print("  contacts per source:")
-            for src, n in scraped_df["email_source"].value_counts().items():
+            for src, n in email_rows["email_source"].value_counts().items():
                 print(f"    {src:<16} {n:>5}")
             print(f"  output: {scraped_path}")
         else:
-            print("  (no scraped contacts produced)")
+            print("  (no rows produced)")
     else:
         print("  scrape stage skipped — see firms_targeted.csv for ICP-filtered firms")
     print("======================================\n")

@@ -434,3 +434,79 @@ def test_title_filter():
     assert not _looks_like_title("206.533.0525 info@…")
     assert not _looks_like_title("")
     assert not _looks_like_title(None)
+
+
+# ----- Combined output: every targeted firm is kept (blank email + reason)
+
+
+from src.scrape_websites import (  # noqa: E402
+    _flatten_results,
+    _missing_email_status,
+    Contact,
+    FirmScrapeResult,
+)
+
+
+def test_missing_email_status_codes():
+    # No result at all (e.g. firm sliced out by --limit) → not_scraped
+    assert _missing_email_status(None) == "not_scraped"
+    # An explicit skip reason is surfaced verbatim
+    assert _missing_email_status(FirmScrapeResult(crd_number="1", domain=None,
+                                                  skipped_reason="no_website")) == "no_website"
+    assert _missing_email_status(FirmScrapeResult(crd_number="2", domain="x.com",
+                                                  skipped_reason="robots")) == "robots"
+    # Pages fetched but nothing usable found → no_email_found
+    res = FirmScrapeResult(crd_number="3", domain="x.com", fetched_paths=["/team"])
+    assert _missing_email_status(res) == "no_email_found"
+
+
+def test_flatten_keeps_every_firm_with_blank_email_and_reason():
+    """The combined file must contain a row for EVERY targeted firm:
+    contacts where we found them, otherwise a blank email + reason code."""
+    firms = pd.DataFrame(
+        [
+            {"_key": "111", "firm_legal_name": "Has Contact LLC", "crd_number": 111,
+             "office_state": "NY", "aum_total": 5e8, "website": "http://a.com", "match_score": 0.9},
+            {"_key": "222", "firm_legal_name": "No Email LLC", "crd_number": 222,
+             "office_state": "CA", "aum_total": 4e8, "website": "http://b.com", "match_score": 0.8},
+            {"_key": "333", "firm_legal_name": "No Website LLC", "crd_number": 333,
+             "office_state": "TX", "aum_total": 3e8, "website": "http://c.com", "match_score": 0.7},
+        ]
+    )
+    results = {
+        "111": FirmScrapeResult(
+            crd_number="111", domain="a.com",
+            contacts=[Contact(name="Jane Doe", title="Founder",
+                              email="jane@a.com", source="scraped_mailto")],
+        ),
+        # 222: pages fetched, no usable email
+        "222": FirmScrapeResult(crd_number="222", domain="b.com", fetched_paths=["/team"]),
+        # 333: an explicit skip reason
+        "333": FirmScrapeResult(crd_number="333", domain="c.com", skipped_reason="all_failed"),
+    }
+
+    rows = _flatten_results(firms, results)
+    by_crd = {r["crd_number"]: r for r in rows}
+
+    # Every firm is present exactly once (none have multiple contacts here)
+    assert len(rows) == 3
+    assert set(by_crd) == {111, 222, 333}
+
+    # Firm with a contact: real email + scraped source
+    assert by_crd[111]["contact_email"] == "jane@a.com"
+    assert by_crd[111]["email_source"] == "scraped_mailto"
+    assert by_crd[111]["contact_name"] == "Jane Doe"
+
+    # Every firm column is carried through (wide, self-contained sheet) and the
+    # internal _key is dropped.
+    assert by_crd[111]["office_state"] == "NY"
+    assert by_crd[111]["aum_total"] == 5e8
+    assert by_crd[111]["match_score"] == 0.9
+    assert "_key" not in by_crd[111]
+
+    # Firms without a contact: blank email (None, not a sentinel) + reason code
+    assert by_crd[222]["contact_email"] is None
+    assert by_crd[222]["email_source"] == "no_email_found"
+    assert by_crd[222]["contact_name"] is None
+    assert by_crd[333]["contact_email"] is None
+    assert by_crd[333]["email_source"] == "all_failed"

@@ -722,7 +722,7 @@ def scrape_websites(
     results = asyncio.run(_scrape_all(firms, scraper_cfg))
 
     rows = _flatten_results(firms, results)
-    out_df = pd.DataFrame(rows)
+    out_df = _order_output_columns(pd.DataFrame(rows))
 
     output_path = output_path or (config.ENRICHED_DIR / f"ria_targets_{datetime.now():%Y%m%d}.csv")
     out_df.to_csv(output_path, index=False)
@@ -730,46 +730,98 @@ def scrape_websites(
     return output_path
 
 
+CONTACT_COLUMNS = ["contact_name", "contact_title", "contact_email", "email_source"]
+
+
+def _order_output_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Place the contact columns immediately after crd_number, keeping every
+    other (firm) column in its natural order. So the wide sheet reads:
+    firm identity → contact → firm detail. Drops the internal _key if present.
+    """
+    cols = [c for c in df.columns if c != "_key"]
+    contact = [c for c in CONTACT_COLUMNS if c in cols]
+    rest = [c for c in cols if c not in contact]
+    if "crd_number" in rest:
+        i = rest.index("crd_number") + 1
+        ordered = rest[:i] + contact + rest[i:]
+    else:
+        ordered = contact + rest
+    return df[ordered]
+
+
+def _missing_email_status(res: FirmScrapeResult | None) -> str:
+    """Status code for a firm that produced no contact.
+
+    Recorded in the `email_source` column so the single combined output says
+    *why* an email is absent rather than just leaving it blank. The values
+    line up with the scraper's own skip reasons; the extra "no_email_found"
+    covers the case where pages were fetched fine but held no usable address,
+    and "not_scraped" covers a firm that never had a result (e.g. excluded by
+    --limit).
+    """
+    if res is None:
+        return "not_scraped"
+    if res.skipped_reason:
+        return res.skipped_reason  # no_website | social_url | robots | all_failed | ...
+    # Pages were fetched OK, but no usable email was on any of them.
+    return "no_email_found"
+
+
 def _flatten_results(firms: pd.DataFrame, results: dict[str, FirmScrapeResult]) -> list[dict]:
-    """One row per (firm, contact). Firms with no scraped contacts are dropped
-    from the enriched output (they remain in firms_targeted.csv)."""
+    """One row per (firm, contact). Every targeted firm appears at least once.
+
+    Firms with at least one scraped contact get one row per unique email.
+    Firms with no contact get a single row with blank contact_* fields and an
+    `email_source` status code explaining why (e.g. "no_email_found",
+    "robots", "all_failed"). The contact_email cell is left *empty* rather than
+    a sentinel string so CRM/sequencer imports treat it correctly as "no email"
+    — the reason lives in email_source instead.
+
+    Every firm column present on the input (all of firms_targeted) is carried
+    through unchanged, so the result is one wide, self-contained sheet: full
+    firm detail + contact, no re-join needed. The internal _key is dropped.
+    """
     out_rows: list[dict] = []
+
+    def _emit(row, *, contact_name, contact_title, contact_email, email_source):
+        firm_cols = {k: v for k, v in row.items() if k != "_key"}
+        firm_cols.update(
+            contact_name=contact_name,
+            contact_title=contact_title,
+            contact_email=contact_email,
+            email_source=email_source,
+        )
+        out_rows.append(firm_cols)
+
     for _, row in firms.iterrows():
         key = row["_key"]
         res = results.get(key)
-        firm_contacts: list[dict] = []
 
+        emitted = 0
         if res and res.contacts:
+            seen = set()
             for c in res.contacts:
-                firm_contacts.append(
-                    dict(
-                        contact_name=c.name,
-                        contact_title=c.title,
-                        contact_email=c.email,
-                        email_source=c.source,
-                    )
+                email = (c.email or "").lower()
+                if not email or email in seen:  # dedupe by email within firm
+                    continue
+                seen.add(email)
+                _emit(
+                    row,
+                    contact_name=c.name,
+                    contact_title=c.title,
+                    contact_email=c.email,
+                    email_source=c.source,
                 )
+                emitted += 1
 
-        # Dedupe by email within firm
-        seen = set()
-        for fc in firm_contacts:
-            email = (fc["contact_email"] or "").lower()
-            if not email or email in seen:
-                continue
-            seen.add(email)
-            out_rows.append(
-                dict(
-                    firm_legal_name=row.get("firm_legal_name"),
-                    crd_number=row.get("crd_number"),
-                    office_state=row.get("office_state"),
-                    aum_total=row.get("aum_total"),
-                    website=row.get("website"),
-                    contact_name=fc["contact_name"],
-                    contact_title=fc["contact_title"],
-                    contact_email=fc["contact_email"],
-                    email_source=fc["email_source"],
-                    match_score=row.get("match_score"),
-                )
+        if emitted == 0:
+            # Keep the firm with a blank email + a reason in email_source.
+            _emit(
+                row,
+                contact_name=None,
+                contact_title=None,
+                contact_email=None,
+                email_source=_missing_email_status(res),
             )
     return out_rows
 
@@ -807,12 +859,20 @@ def _print_scrape_summary(
         else:
             error_buckets[reason] = error_buckets.get(reason, 0) + 1
 
-    by_source = out_df["email_source"].value_counts().to_dict() if not out_df.empty else {}
+    # Only rows that carry a real address count as "contacts"; the rest are
+    # firm rows kept with a blank email and a reason in email_source.
+    if not out_df.empty:
+        email_rows = out_df[out_df["contact_email"].notna() & (out_df["contact_email"] != "")]
+    else:
+        email_rows = out_df
+    by_source = email_rows["email_source"].value_counts().to_dict() if not email_rows.empty else {}
 
     print("\n[scrape_websites] summary")
     print(f"  firms attempted:        {n_firms:,}")
     print(f"  firms with >=1 contact: {n_with_contacts:,}")
-    print(f"  total contact rows:     {len(out_df):,}")
+    print(f"  firms w/o any contact:  {n_firms - n_with_contacts:,}")
+    print(f"  contact rows (w/ email):{len(email_rows):>6,}")
+    print(f"  total output rows:      {len(out_df):,}")
     print("  skip-reason breakdown:")
     for key, label in bucket_labels.items():
         print(f"    {label:<35} {buckets[key]:>5}")
