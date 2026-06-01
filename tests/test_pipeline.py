@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.parse_adv import _build_column_map, parse_adv  # noqa: E402
+from src.parse_adv import _build_column_map, parse_adv, PartialSnapshotError  # noqa: E402
 from src.scrape_websites import _scrape_one_firm  # noqa: E402
 from src.utils import normalize_url  # noqa: E402
 import config  # noqa: E402
@@ -109,6 +109,35 @@ def test_parse_adv_end_to_end_smoke(tmp_path: Path, monkeypatch):
     assert int(out.loc[0, "individual_clients"]) == 563
     assert out.loc[0, "individual_aum_dollars"] == 164_144_017.0
     assert out.loc[0, "has_custody"] is False or out.loc[0, "has_custody"] == False  # noqa: E712
+
+
+def test_parse_adv_rejects_partial_snapshot(tmp_path: Path, monkeypatch):
+    """A reduced month-start file (identity columns but no Item-5 financials)
+    must raise PartialSnapshotError and write NOTHING, so it can't clobber the
+    good processed outputs."""
+    # Identity/address/website present; aum/hnw/employee columns absent.
+    df_in = pd.DataFrame(
+        {
+            "Legal Name": ["Acme Wealth LLC", "Beta Capital"],
+            "Organization CRD#": ["123456", "789012"],
+            "Main Office State": ["NY", "CA"],
+            "Website Address": ["www.acmewealth.com", "www.betacap.com"],
+        }
+    )
+    xlsx = tmp_path / "partial.xlsx"
+    df_in.to_excel(xlsx, index=False)
+
+    out_parquet = tmp_path / "firms_clean.parquet"
+    monkeypatch.setattr(config, "PROCESSED_DIR", tmp_path)
+    monkeypatch.setattr(config, "CLEAN_PARQUET", out_parquet)
+    monkeypatch.setattr(config, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(config, "COLUMN_MAP_LOG", tmp_path / "logs" / "column_mapping.log")
+
+    with pytest.raises(PartialSnapshotError) as ei:
+        parse_adv(xlsx)
+    # Message names a missing required column and does not write the parquet.
+    assert "aum_total" in str(ei.value)
+    assert not out_parquet.exists(), "partial snapshot must not write firms_clean.parquet"
 
 
 class _StubResponse:

@@ -18,7 +18,7 @@ import pandas as pd
 import config
 from src.utils import get_logger
 from src.download_adv import download_latest
-from src.parse_adv import parse_adv
+from src.parse_adv import parse_adv, PartialSnapshotError
 from src.filter_firms import filter_firms
 from src.scrape_websites import scrape_websites
 
@@ -50,7 +50,15 @@ def run(skip_download: bool, skip_scrape: bool, limit: int | None) -> int:
         downloaded_rows = result.row_count
 
     # --- Stage 2 (idempotent: re-parses whatever data file is on disk)
-    df = parse_adv(data_path)
+    try:
+        df = parse_adv(data_path)
+    except PartialSnapshotError as exc:
+        log.error("Aborting before any output was written: %s", exc)
+        print("\n========== PIPELINE ABORTED (partial snapshot) ==========")
+        print(f"  {exc}")
+        print("  No files were changed — existing processed/enriched outputs are intact.")
+        print("=========================================================\n")
+        return 2
 
     # --- Stage 3
     targeted = filter_firms(df, config.DEFAULT_ICP)

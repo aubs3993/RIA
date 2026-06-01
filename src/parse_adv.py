@@ -3,6 +3,18 @@
 Column naming in the SEC bulk file shifts over time (case, punctuation, suffixes
 like '5F(2)(c)' vs '5F.(2)(c)'). We match by normalized regex prefix to stay
 tolerant. Anything that fails to match is logged but does not crash the run.
+
+PARTIAL / PRELIMINARY SNAPSHOTS
+-------------------------------
+On the 1st of each month the SEC sometimes posts a *reduced* preliminary export
+before the full file lands a few days later. Observed difference (e.g. 2026-06):
+    full monthly export : ~5.2 MB zip, ~448 columns, UTF-8, ~16.8k firms
+    partial month-start : ~0.8 MB zip, ~171 columns, cp1252, ~6.5k firms,
+                          and MISSING all of Item 5 (AUM, HNW, employees).
+The partial file is useless for the ICP (every firm scores NaN -> 0 matches).
+To stop it silently overwriting good processed outputs, parse_adv refuses to
+parse any snapshot missing REQUIRED_COLUMNS (raises PartialSnapshotError before
+writing anything). Re-run once the complete file is published.
 """
 from __future__ import annotations
 
@@ -99,6 +111,19 @@ COLUMN_RULES: list[tuple[str, list[str]]] = [
         r"^total custody amount$",
     ]),
 ]
+
+
+# Columns the ICP cannot function without. A snapshot that fails to provide any
+# of these is almost certainly the SEC's reduced month-start preliminary file
+# (see module docstring), not the full monthly export. We refuse to parse it so
+# it can't overwrite good processed outputs.
+REQUIRED_COLUMNS = ("aum_total", "hnw_clients", "hnw_aum_dollars", "employee_count")
+
+
+class PartialSnapshotError(RuntimeError):
+    """A snapshot is missing ICP-critical columns (a partial/preliminary SEC
+    export). Raised before any output is written, so existing processed files
+    are left untouched."""
 
 
 @dataclass
@@ -219,6 +244,20 @@ def parse_adv(source_path: Path) -> pd.DataFrame:
 
     cmap = _build_column_map(list(df_raw.columns))
     _write_column_map_log(cmap, source_path)
+
+    # Sanity gate: bail out (without writing anything) on a partial snapshot so a
+    # reduced month-start file can't clobber the good processed outputs.
+    missing_required = [c for c in REQUIRED_COLUMNS if c in cmap.unmatched_clean_names]
+    if missing_required:
+        msg = (
+            f"{source_path.name} is missing required column(s) {missing_required} "
+            f"({df_raw.shape[1]} columns / {len(df_raw):,} rows). This looks like the "
+            f"SEC's partial month-start export, not the full monthly file (~448 cols, "
+            f"~16.8k firms). Refusing to parse so existing outputs are preserved — "
+            f"re-run once the complete file is published (usually within a few days)."
+        )
+        log.error(msg)
+        raise PartialSnapshotError(msg)
 
     for clean in cmap.unmatched_clean_names:
         log.warning("No source column matched for '%s' — downstream will see NaN", clean)

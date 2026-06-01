@@ -2,6 +2,11 @@
 
 Scrapes the SEC index page for the most recent "Registered Investment Advisers"
 zip, downloads it (skipping if cached), unzips, and returns the path to the xlsx.
+
+Heads-up: on the 1st of the month the SEC may post a *partial* preliminary file
+(~0.8 MB) days before the full monthly export (~5.2 MB). We download whatever is
+newest but warn loudly when the zip is below MIN_EXPECTED_ZIP_BYTES; parse_adv is
+the authoritative gate that refuses to act on a partial file (see its docstring).
 """
 from __future__ import annotations
 
@@ -23,6 +28,11 @@ log = get_logger("download_adv", config.LOG_DIR / "pipeline.log")
 # SEC zip names: ia<MMDDYY>.zip  (e.g. ia040126.zip = April 1, 2026).
 # Exempt-reporting zips end in -exempt.zip and are excluded here.
 _IA_ZIP_RE = re.compile(r"ia(\d{2})(\d{2})(\d{2})\.zip$", re.I)
+
+# Full monthly exports run ~5.2 MB; the SEC's partial month-start file is ~0.8 MB.
+# Anything under this threshold is almost certainly the partial file — we warn
+# here and let parse_adv reject it on column content (the authoritative check).
+MIN_EXPECTED_ZIP_BYTES = 2_000_000
 
 
 @dataclass
@@ -157,6 +167,15 @@ def download_latest(force: bool = False) -> DownloadResult:
         # Be polite even on the index → download hop.
         time.sleep(1.0)
         bytes_dl = _download_zip(url, zip_dest)
+
+    zip_bytes = zip_dest.stat().st_size
+    if zip_bytes < MIN_EXPECTED_ZIP_BYTES:
+        log.warning(
+            "%s is only %.1f MB (< %.1f MB expected) — this is almost certainly the "
+            "SEC's PARTIAL month-start file, not the full export. parse_adv will refuse "
+            "to act on it if the Item-5 columns are missing.",
+            zip_dest.name, zip_bytes / 1e6, MIN_EXPECTED_ZIP_BYTES / 1e6,
+        )
 
     data_path = _unzip_data_file(zip_dest, config.RAW_DIR)
     rows = _quick_row_count(data_path)
