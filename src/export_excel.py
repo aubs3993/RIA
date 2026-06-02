@@ -15,6 +15,7 @@ Usage:  python -m src.export_excel
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -24,12 +25,29 @@ from openpyxl.utils import get_column_letter
 import config
 
 # Must stay TEXT so Excel doesn't strip leading zeros / use scientific notation.
-TEXT_COLS = ["crd_number", "sec_number", "office_zip", "office_phone"]
+TEXT_COLS = ["crd_number", "sec_number", "office_zip"]
 # Integer columns that can contain blanks -> nullable Int (no trailing ".0").
 INT_COLS = [
     "employee_count", "investment_advisory_employees", "individual_clients",
     "hnw_clients", "total_accounts", "Zomma Priority", "Zomma Fit",
 ]
+# office_phone is stored as the bare 10-digit number and rendered XXX-XXX-XXXX
+# by Excel. International / malformed numbers are kept as their original text.
+PHONE_FMT = "000-000-0000"
+
+
+def _normalize_phone(v):
+    """Return a US phone as a 10-digit int (drops a leading country-code 1), or
+    the original string for international / non-10-digit values, or NA if blank."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return pd.NA
+    s = str(v).strip()
+    if not s or s.lower() == "nan":
+        return pd.NA
+    d = re.sub(r"\D", "", s)
+    if len(d) == 11 and d.startswith("1"):
+        d = d[1:]
+    return int(d) if len(d) == 10 else s
 
 
 def _write_sheet(xl, df: pd.DataFrame, sheet_name: str) -> None:
@@ -57,6 +75,7 @@ def _write_sheet(xl, df: pd.DataFrame, sheet_name: str) -> None:
     for c in [x for x in df.columns if "aum" in x.lower() or "dollars" in x.lower()]:
         set_format(c, "#,##0")           # 1,117,783,829
     set_format("match_score", "0.000")
+    set_format("office_phone", PHONE_FMT)  # 10-digit number -> 617-951-9969
 
     for col_name, col_idx in col_of.items():
         letter = get_column_letter(col_idx)
@@ -69,14 +88,19 @@ def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
     csv_path = Path(csv_path) if csv_path else (config.ENRICHED_DIR / "ria_master_20260504.csv")
     xlsx_path = Path(xlsx_path) if xlsx_path else csv_path.with_suffix(".xlsx")
 
-    # Read the ID/zip/phone columns as strings up front so leading zeros survive.
-    df = pd.read_csv(csv_path, dtype={c: str for c in TEXT_COLS}, low_memory=False)
+    # Read ID/zip/phone columns as strings up front so leading zeros / formats survive.
+    df = pd.read_csv(csv_path, dtype={c: str for c in TEXT_COLS + ["office_phone"]},
+                     low_memory=False)
 
     # Clean the text columns: blank out missing, strip a stray trailing ".0".
     for c in TEXT_COLS:
         if c in df.columns:
             s = df[c].where(df[c].notna(), "").astype(str).str.strip()
             df[c] = s.str.replace(r"\.0$", "", regex=True).replace({"nan": ""})
+
+    # Normalize phone to a bare 10-digit number (Excel renders the dashes).
+    if "office_phone" in df.columns:
+        df["office_phone"] = df["office_phone"].map(_normalize_phone)
 
     # Counts / flags / scores -> nullable Int64 so blanks stay blank, not "1.0".
     int_cols = INT_COLS + [c for c in df.columns if c.startswith("svc_")]
