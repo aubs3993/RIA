@@ -32,6 +32,39 @@ INT_COLS = [
 ]
 
 
+def _write_sheet(xl, df: pd.DataFrame, sheet_name: str) -> None:
+    """Write one dataframe to a sheet: text-safe IDs, formatted dollars, a bold +
+    frozen header (row 1 and the firm-name column), autofilter, capped widths."""
+    df.to_excel(xl, index=False, sheet_name=sheet_name)
+    ws = xl.sheets[sheet_name]
+    col_of = {cell.value: cell.column for cell in ws[1]}
+
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(vertical="center")
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+
+    def set_format(colname: str, number_format: str) -> None:
+        if colname not in col_of:
+            return
+        letter = get_column_letter(col_of[colname])
+        for cell in ws[letter][1:]:  # skip header
+            cell.number_format = number_format
+
+    for c in TEXT_COLS:
+        set_format(c, "@")               # explicit text format
+    for c in [x for x in df.columns if "aum" in x.lower() or "dollars" in x.lower()]:
+        set_format(c, "#,##0")           # 1,117,783,829
+    set_format("match_score", "0.000")
+
+    for col_name, col_idx in col_of.items():
+        letter = get_column_letter(col_idx)
+        sample = df[col_name].astype(str).head(400)
+        width = max(len(str(col_name)), int(sample.str.len().max() or 0)) + 2
+        ws.column_dimensions[letter].width = min(max(width, 10), 45)
+
+
 def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
     csv_path = Path(csv_path) if csv_path else (config.ENRICHED_DIR / "ria_master_20260504.csv")
     xlsx_path = Path(xlsx_path) if xlsx_path else csv_path.with_suffix(".xlsx")
@@ -51,8 +84,6 @@ def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
 
-    dollar_cols = [c for c in df.columns if "aum" in c.lower() or "dollars" in c.lower()]
-
     # --- pre-sort: best targets first, each firm's contact rows kept together,
     #     and the emailable/named contact floated to the top of the firm block.
     he = df["contact_email"].notna() & (df["contact_email"].astype(str).str.strip() != "")
@@ -70,39 +101,21 @@ def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
             .drop(columns=["_he", "_hn"])
             .reset_index(drop=True))
 
+    # "Company Only" tab: drop the per-contact columns and collapse to one row
+    # per firm. drop_duplicates keeps the first (already-sorted) row, so the
+    # firm order matches the master tab exactly.
+    contact_cols = ["contact_name", "contact_title", "contact_email", "email_source"]
+    company = (df.drop(columns=[c for c in contact_cols if c in df.columns])
+                 .drop_duplicates(subset="crd_number", keep="first")
+                 .reset_index(drop=True))
+
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as xl:
-        df.to_excel(xl, index=False, sheet_name="RIA Master")
-        ws = xl.sheets["RIA Master"]
-        col_of = {cell.value: cell.column for cell in ws[1]}
+        _write_sheet(xl, df, "RIA Master")
+        _write_sheet(xl, company, "Company Only")
 
-        # Header: bold + frozen (row 1 and the firm-name column A); autofilter.
-        for cell in ws[1]:
-            cell.font = Font(bold=True)
-            cell.alignment = Alignment(vertical="center")
-        ws.freeze_panes = "B2"
-        ws.auto_filter.ref = ws.dimensions
-
-        def set_format(colname: str, number_format: str) -> None:
-            if colname not in col_of:
-                return
-            letter = get_column_letter(col_of[colname])
-            for cell in ws[letter][1:]:  # skip header
-                cell.number_format = number_format
-
-        for c in TEXT_COLS:
-            set_format(c, "@")               # explicit text format
-        for c in dollar_cols:
-            set_format(c, "#,##0")           # 1,117,783,829
-        set_format("match_score", "0.000")
-
-        # Reasonable, capped auto-width per column.
-        for col_name, col_idx in col_of.items():
-            letter = get_column_letter(col_idx)
-            sample = df[col_name].astype(str).head(400)
-            width = max(len(str(col_name)), int(sample.str.len().max() or 0)) + 2
-            ws.column_dimensions[letter].width = min(max(width, 10), 45)
-
-    print(f"Wrote {xlsx_path}  ({len(df):,} rows x {df.shape[1]} cols)")
+    print(f"Wrote {xlsx_path}")
+    print(f"  RIA Master   : {len(df):,} rows x {df.shape[1]} cols  (one row per firm-contact)")
+    print(f"  Company Only : {len(company):,} rows x {company.shape[1]} cols  (one row per firm)")
     return xlsx_path
 
 
