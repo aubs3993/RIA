@@ -6,6 +6,8 @@ where:
   - ID/zip/phone columns are real TEXT cells (leading zeros kept, no sci-notation)
   - dollars stay numeric with thousands separators; counts/flags stay integers
   - match_score shows 3 decimals
+  - rows are pre-sorted best-first (Zomma Priority, then Fit, then match_score),
+    with each firm's contact rows kept together
   - the header row is bold + frozen, the firm-name column is frozen, and an
     autofilter is applied so the sheet is sortable/filterable on open.
 
@@ -50,6 +52,23 @@ def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
 
     dollar_cols = [c for c in df.columns if "aum" in c.lower() or "dollars" in c.lower()]
+
+    # --- pre-sort: best targets first, each firm's contact rows kept together,
+    #     and the emailable/named contact floated to the top of the firm block.
+    he = df["contact_email"].notna() & (df["contact_email"].astype(str).str.strip() != "")
+    hn = df["contact_name"].notna()
+    by, asc = [], []
+    for col, ascending in [("Zomma Priority", False), ("Zomma Fit", False),
+                           ("match_score", False), ("crd_number", True)]:
+        if col in df.columns:
+            by.append(col)
+            asc.append(ascending)
+    by += ["_he", "_hn"]
+    asc += [False, False]
+    df = (df.assign(_he=he.astype(int), _hn=hn.astype(int))
+            .sort_values(by=by, ascending=asc, kind="mergesort")
+            .drop(columns=["_he", "_hn"])
+            .reset_index(drop=True))
 
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as xl:
         df.to_excel(xl, index=False, sheet_name="RIA Master")
