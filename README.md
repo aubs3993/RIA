@@ -66,6 +66,27 @@ python -m src.filter_firms
 python -m src.scrape_websites --limit 50
 ```
 
+### Primary-contact pass (CFO cascade)
+
+A second scrape that finds one decision-maker per firm and adds three
+firm-level columns to the enriched master (`primary_contact_title`,
+`primary_contact_name`, `primary_contact_email`):
+
+```powershell
+python -m src.scrape_primary_contact               # full run, updates CSV + xlsx
+python -m src.scrape_primary_contact --limit 25    # first 25 firms
+python -m src.scrape_primary_contact --cache-only  # no network, cached pages only
+python -m src.scrape_primary_contact --dry-run     # print, write nothing
+```
+
+It walks a strict title cascade and stops at the first level that yields a
+person: **CFO → COO → Director of Finance → Controller → Managing Partner →
+any contact found** (with whatever title they have). Cached pages are scanned
+first; leadership-likely paths (`/team`, `/leadership`, `/management`, ...)
+are then fetched with the same politeness rules as the main scraper. Emails
+are taken from the page when visible, otherwise matched from the firm's
+already-scraped emails by name pattern (`jane.doe@`, `jdoe@`, ...).
+
 ## Outputs
 
 - `data/raw/ia_YYYY_MM.zip` — the SEC bulk download

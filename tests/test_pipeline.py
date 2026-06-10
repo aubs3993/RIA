@@ -539,3 +539,107 @@ def test_flatten_keeps_every_firm_with_blank_email_and_reason():
     assert by_crd[222]["contact_name"] is None
     assert by_crd[333]["contact_email"] is None
     assert by_crd[333]["email_source"] == "all_failed"
+
+
+# ----- Primary-contact cascade (CFO -> COO -> ... -> any contact)
+
+
+from src.scrape_primary_contact import (  # noqa: E402
+    candidates_from_html,
+    match_email_by_name,
+    _best,
+    _fallback_candidate,
+    _title_level,
+    CASCADE,
+)
+
+
+def test_title_cascade_order_and_patterns():
+    assert _title_level("Chief Financial Officer") == 0
+    assert _title_level("Partner & CFO") == 0
+    assert _title_level("Chief Operating Officer") == 1
+    assert _title_level("COO") == 1
+    assert _title_level("Director of Finance") == 2
+    assert _title_level("Finance Director") == 2
+    assert _title_level("Controller") == 3
+    assert _title_level("Comptroller") == 3
+    assert _title_level("Managing Partner") == 4
+    # Non-cascade titles don't match at all
+    assert _title_level("Chief Investment Officer") is None
+    assert _title_level("Senior Wealth Advisor") is None
+    # GDPR boilerplate must not look like a Controller
+    assert _title_level("acts as the data controller for this site") is None
+    # lowercase 'coo'/'cfo' in prose must not match the acronym patterns
+    assert _title_level("babies coo softly") is None
+
+
+def test_candidates_from_html_finds_cfo_with_email():
+    html = """
+    <html><body>
+      <div class="team-card">
+        <h3>Maureen Brooks</h3>
+        <p class="role">Chief Financial Officer</p>
+        <a href="mailto:maureen.brooks@acmewealth.com">Email</a>
+      </div>
+      <div class="team-card">
+        <h3>Doug Peterson</h3>
+        <p class="role">Chief Operating Officer</p>
+        <a href="mailto:doug.peterson@acmewealth.com">Email</a>
+      </div>
+    </body></html>
+    """
+    cands = candidates_from_html(html, "acmewealth.com", "/team", "ACME WEALTH LLC")
+    best = _best(cands)
+    assert best is not None
+    assert best.level == 0  # CFO outranks COO on the same page
+    assert best.name == "Maureen Brooks"
+    assert best.email == "maureen.brooks@acmewealth.com"
+    assert "Chief Financial Officer" in best.title
+
+
+def test_candidates_cascade_falls_to_coo_when_no_cfo():
+    html = """
+    <html><body>
+      <div><h3>Doug Peterson</h3><p>Chief Operating Officer</p></div>
+      <div><h3>Sarah Woods</h3><p>Managing Partner</p></div>
+    </body></html>
+    """
+    cands = candidates_from_html(html, "acmewealth.com", "/team", "ACME WEALTH LLC")
+    best = _best(cands)
+    assert best is not None
+    assert best.level == 1
+    assert best.name == "Doug Peterson"
+
+
+def test_match_email_by_name_patterns():
+    emails = ["maureen.brooks@firm.com", "dpeterson@firm.com", "info@firm.com"]
+    assert match_email_by_name("Maureen Brooks", emails) == "maureen.brooks@firm.com"
+    assert match_email_by_name("Doug Peterson", emails) == "dpeterson@firm.com"
+    # O'Brien-style punctuation is normalized away
+    assert match_email_by_name("Pat O'Toole", ["potoole@firm.com"]) == "potoole@firm.com"
+    # No plausible match -> None (info@ is never matched by name)
+    assert match_email_by_name("Jane Quill", emails) is None
+    assert match_email_by_name(None, emails) is None
+
+
+def test_fallback_prefers_personal_email_with_name():
+    existing = [
+        {"contact_name": None, "contact_title": None, "contact_email": "info@firm.com"},
+        {"contact_name": "Bruce Reeder",
+         "contact_title": "Bruce Reeder Senior Wealth Advisor View Bio",
+         "contact_email": "bruce.reeder@firm.com"},
+    ]
+    c = _fallback_candidate(existing, harvested=[])
+    assert c is not None
+    assert c.level == len(CASCADE)  # fallback level
+    assert c.name == "Bruce Reeder"
+    assert c.email == "bruce.reeder@firm.com"
+    # Title cleaned: leading name + trailing "View Bio" stripped
+    assert c.title == "Senior Wealth Advisor"
+
+
+def test_fallback_uses_low_value_email_as_last_resort():
+    existing = [{"contact_name": None, "contact_title": None, "contact_email": "info@firm.com"}]
+    c = _fallback_candidate(existing, harvested=[])
+    assert c is not None
+    assert c.email == "info@firm.com"
