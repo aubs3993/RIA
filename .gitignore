@@ -1,6 +1,6 @@
-data/raw/
-data/processed/
-data/enriched/
+# Scraped data + Item-import checkpoints contain PII (names/emails/phones) — keep off GitHub
+data/
+item_import/
 logs/
 .venv/
 venv/

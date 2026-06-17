@@ -500,7 +500,9 @@ async def _scrape_one_firm(
     standalone (e.g. tests).
     """
     website = firm.get("website")
-    crd = firm.get("crd_number")
+    # Generic entity key: RIA firms carry crd_number; FDIC banks carry
+    # cert_number. crd stays first so RIA behaviour is unchanged.
+    crd = firm.get("crd_number") or firm.get("cert_number")
     result = FirmScrapeResult(crd_number=crd, domain=None)
     social_blocklist = {d.lower() for d in getattr(config, "SOCIAL_URL_BLOCKLIST", [])}
 
@@ -671,8 +673,9 @@ async def _scrape_all(
             res = await _scrape_one_firm(firm_dict, client, sem, cfg, redirect_owner=redirect_owner)
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("unexpected error scraping %s: %s", key, exc)
+            _id = firm_dict.get("crd_number") or firm_dict.get("cert_number")
             res = FirmScrapeResult(
-                crd_number=str(firm_dict.get("crd_number")) if firm_dict.get("crd_number") else None,
+                crd_number=str(_id) if _id else None,
                 domain=None,
                 skipped_reason=f"error:{type(exc).__name__}",
             )
@@ -682,7 +685,7 @@ async def _scrape_all(
         coros = []
         for _, row in firms.iterrows():
             d = row.to_dict()
-            key = str(d.get("crd_number") or d.get("sec_number") or d.get("firm_legal_name") or id(d))
+            key = str(d.get("crd_number") or d.get("cert_number") or d.get("sec_number") or d.get("firm_legal_name") or id(d))
             coros.append(_run_one(key, d))
 
         for fut in atqdm.as_completed(coros, total=len(coros), desc="scraping"):
@@ -716,7 +719,7 @@ def scrape_websites(
     keys: list[str] = []
     for _, row in firms.iterrows():
         d = row.to_dict()
-        keys.append(str(d.get("crd_number") or d.get("sec_number") or d.get("firm_legal_name") or id(d)))
+        keys.append(str(d.get("crd_number") or d.get("cert_number") or d.get("sec_number") or d.get("firm_legal_name") or id(d)))
     firms = firms.assign(_key=keys)
 
     results = asyncio.run(_scrape_all(firms, scraper_cfg))

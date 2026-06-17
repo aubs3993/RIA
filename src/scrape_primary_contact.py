@@ -27,15 +27,22 @@ How it searches, per firm:
      2s delay, backoff). Fetched pages are cached for future runs.
   3. Fetching stops early once a named CFO is found (nothing outranks level 1).
 
+Progress is checkpointed: every finished firm is appended to
+data/enriched/primary_contact_checkpoint.csv, and the master CSV + xlsx are
+refreshed every --checkpoint-every firms. If a run dies, rerunning resumes
+from the checkpoint; the checkpoint is removed after a fully successful run.
+
 Usage:
     python -m src.scrape_primary_contact                # full run, updates master + xlsx
     python -m src.scrape_primary_contact --limit 25     # first 25 firms only
     python -m src.scrape_primary_contact --cache-only   # no network, cached pages only
     python -m src.scrape_primary_contact --dry-run      # print results, write nothing
+    python -m src.scrape_primary_contact --restart      # ignore an existing checkpoint
 """
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -453,7 +460,7 @@ async def _search_one_firm(
     sem: asyncio.Semaphore,
     cfg: config.ScraperConfig,
 ) -> FirmPrimaryResult:
-    crd = firm.get("crd_number")
+    crd = firm.get("entity_id")
     firm_name = firm.get("firm_legal_name")
     website = firm.get("website")
     existing = firm.get("existing_contacts") or []
@@ -548,13 +555,16 @@ async def _search_one_firm(
 
 
 async def _search_all(firms: list[dict], cfg: config.ScraperConfig,
-                      cache_only: bool) -> list[FirmPrimaryResult]:
+                      cache_only: bool,
+                      on_result=None) -> list[FirmPrimaryResult]:
     sem = asyncio.Semaphore(cfg.max_concurrent_domains)
 
     if cache_only:
         results = []
         for f in atqdm(firms, desc="primary-contact (cache-only)"):
             results.append(await _search_one_firm(f, None, sem, cfg))
+            if on_result:
+                on_result(results[-1])
         return results
 
     timeout = httpx.Timeout(cfg.request_timeout_seconds, connect=cfg.request_timeout_seconds)
@@ -566,9 +576,9 @@ async def _search_all(firms: list[dict], cfg: config.ScraperConfig,
         try:
             return await _search_one_firm(f, client, sem, cfg)
         except Exception as exc:  # pragma: no cover - defensive
-            log.exception("primary-contact search failed for CRD %s: %s",
-                          f.get("crd_number"), exc)
-            return FirmPrimaryResult(crd_number=f.get("crd_number"), candidate=None,
+            log.exception("primary-contact search failed for entity %s: %s",
+                          f.get("entity_id"), exc)
+            return FirmPrimaryResult(crd_number=f.get("entity_id"), candidate=None,
                                      skipped_reason=f"error:{type(exc).__name__}")
 
     results: list[FirmPrimaryResult] = []
@@ -577,23 +587,31 @@ async def _search_all(firms: list[dict], cfg: config.ScraperConfig,
         coros = [_run_one(f) for f in firms]
         for fut in atqdm.as_completed(coros, total=len(coros), desc="primary-contact"):
             results.append(await fut)
+            if on_result:
+                on_result(results[-1])
     return results
 
 
 # ---------- Entry point ---------------------------------------------------------
 
 
-def _firms_from_master(master: pd.DataFrame, limit: int | None) -> list[dict]:
-    """One dict per firm, in master order, carrying its existing contact rows."""
+def _firms_from_master(master: pd.DataFrame, limit: int | None,
+                       id_col: str = "crd_number") -> list[dict]:
+    """One dict per firm, in master order, carrying its existing contact rows.
+
+    `id_col` is the per-entity key column — `crd_number` for RIA firms,
+    `cert_number` for FDIC banks. The value is stored under `entity_id` so the
+    rest of the module stays source-agnostic.
+    """
     firms: list[dict] = []
     seen: set = set()
-    for crd, grp in master.groupby("crd_number", sort=False):
-        if crd in seen:
+    for ent_id, grp in master.groupby(id_col, sort=False):
+        if ent_id in seen:
             continue
-        seen.add(crd)
+        seen.add(ent_id)
         first = grp.iloc[0]
         firms.append({
-            "crd_number": crd,
+            "entity_id": ent_id,
             "firm_legal_name": first.get("firm_legal_name"),
             "website": first.get("website"),
             "existing_contacts": grp[["contact_name", "contact_title", "contact_email"]]
@@ -604,39 +622,107 @@ def _firms_from_master(master: pd.DataFrame, limit: int | None) -> list[dict]:
     return firms
 
 
+def _result_row(r: FirmPrimaryResult, id_col: str = "crd_number") -> dict:
+    """One checkpoint-CSV row per finished firm."""
+    c = r.candidate
+    label = "none" if c is None else (
+        CASCADE[c.level][0] if c.level < len(CASCADE) else FALLBACK_LABEL)
+    return {
+        id_col: r.crd_number,
+        "primary_contact_title": c.title if c else None,
+        "primary_contact_name": c.name if c else None,
+        "primary_contact_email": c.email if c else None,
+        "cascade_label": label,
+        "pages_fetched": r.pages_fetched,
+        "skipped_reason": r.skipped_reason,
+    }
+
+
+def _merge_and_write(master_path: Path, flags: pd.DataFrame, export_xlsx: bool,
+                     id_col: str = "crd_number") -> None:
+    """Merge firm-level primary-contact columns onto the master, after email_source.
+
+    Re-reads the master from disk and writes it atomically (tmp + replace), so
+    it is safe to call repeatedly mid-run.
+    """
+    master = pd.read_csv(master_path, low_memory=False)
+    master = master.drop(columns=[c for c in PRIMARY_COLS if c in master.columns])
+    master = master.merge(flags[[id_col] + PRIMARY_COLS], on=id_col, how="left")
+    cols = [c for c in master.columns if c not in PRIMARY_COLS]
+    anchor = cols.index("email_source") + 1 if "email_source" in cols else len(cols)
+    master = master[cols[:anchor] + PRIMARY_COLS + cols[anchor:]]
+    tmp = master_path.with_suffix(".csv.tmp")
+    master.to_csv(tmp, index=False)
+    os.replace(tmp, master_path)
+
+    if export_xlsx:
+        from src.export_excel import export
+        export(csv_path=master_path)
+
+
 def run(master_path: Path | None = None, limit: int | None = None,
         cache_only: bool = False, dry_run: bool = False,
         export_xlsx: bool = True,
-        scraper_cfg: config.ScraperConfig = config.DEFAULT_SCRAPER) -> None:
+        scraper_cfg: config.ScraperConfig = config.DEFAULT_SCRAPER,
+        resume: bool = True, checkpoint_every: int = 250) -> None:
     config.ensure_dirs()
     master_path = Path(master_path) if master_path else (
         config.ENRICHED_DIR / "ria_master_20260504.csv")
     master = pd.read_csv(master_path, low_memory=False)
 
-    firms = _firms_from_master(master, limit)
+    # Per-entity key: RIA masters carry crd_number, FDIC banks cert_number,
+    # NCUA credit unions cu_number. First present wins.
+    id_col = next((c for c in ("crd_number", "cert_number", "cu_number")
+                   if c in master.columns), "crd_number")
+    firms = _firms_from_master(master, limit, id_col)
+
+    # Checkpoint lives beside the master so RIA and FDIC runs never collide.
+    ckpt_path = master_path.parent / "primary_contact_checkpoint.csv"
+    done = pd.DataFrame()
+    if not dry_run and ckpt_path.exists():
+        if resume:
+            # on_bad_lines guards against a partial last line from a killed run.
+            done = pd.read_csv(ckpt_path, on_bad_lines="skip")
+            done = done.drop_duplicates(id_col, keep="last")
+            already = set(done[id_col])
+            firms = [f for f in firms if f["entity_id"] not in already]
+            log.info("Resuming from checkpoint: %d firms done, %d remaining",
+                     len(already), len(firms))
+            print(f"Resuming from checkpoint: {len(already):,} firms done, "
+                  f"{len(firms):,} remaining")
+        else:
+            ckpt_path.unlink()
+
     log.info("Primary-contact search over %d firms (cache_only=%s)", len(firms), cache_only)
 
-    results = asyncio.run(_search_all(firms, scraper_cfg, cache_only))
+    n_since_flush = 0
 
-    rows = []
-    by_label: dict[str, int] = {}
-    for r in results:
-        c = r.candidate
-        label = "none" if c is None else (
-            CASCADE[c.level][0] if c.level < len(CASCADE) else FALLBACK_LABEL)
-        by_label[label] = by_label.get(label, 0) + 1
-        rows.append({
-            "crd_number": r.crd_number,
-            "primary_contact_title": c.title if c else None,
-            "primary_contact_name": c.name if c else None,
-            "primary_contact_email": c.email if c else None,
-        })
-    flags = pd.DataFrame(rows)
+    def _on_result(r: FirmPrimaryResult) -> None:
+        nonlocal n_since_flush
+        if dry_run:
+            return
+        write_header = not ckpt_path.exists()
+        pd.DataFrame([_result_row(r, id_col)]).to_csv(
+            ckpt_path, mode="a", header=write_header, index=False)
+        n_since_flush += 1
+        if checkpoint_every and n_since_flush >= checkpoint_every:
+            n_since_flush = 0
+            flags = pd.read_csv(ckpt_path, on_bad_lines="skip") \
+                .drop_duplicates(id_col, keep="last")
+            _merge_and_write(master_path, flags, export_xlsx, id_col)
+            log.info("Checkpoint flush: %d firms merged into master", len(flags))
 
-    n_pages = sum(r.pages_fetched for r in results)
+    results = asyncio.run(_search_all(firms, scraper_cfg, cache_only, _on_result))
+
+    new_rows = pd.DataFrame([_result_row(r, id_col) for r in results])
+    flags = pd.concat([done, new_rows], ignore_index=True) if len(done) else new_rows
+    flags = flags.drop_duplicates(id_col, keep="last")
+
+    n_pages = int(flags["pages_fetched"].fillna(0).sum())
     n_email = int(flags["primary_contact_email"].notna().sum())
     n_name = int(flags["primary_contact_name"].notna().sum())
-    print(f"\n=== Primary-contact search over {len(firms):,} firms ===")
+    by_label = flags["cascade_label"].value_counts().to_dict()
+    print(f"\n=== Primary-contact search over {len(flags):,} firms ===")
     print(f"  pages fetched (network):   {n_pages:,}")
     print(f"  firms with a name:         {n_name:,}")
     print(f"  firms with an email:       {n_email:,}")
@@ -649,22 +735,15 @@ def run(master_path: Path | None = None, limit: int | None = None,
     if dry_run:
         with pd.option_context("display.max_rows", None, "display.width", 200,
                                "display.max_colwidth", 60):
-            print(flags.to_string(index=False))
+            print(flags[[id_col] + PRIMARY_COLS].to_string(index=False))
         print("\n(dry run — nothing written)")
         return
 
-    # Merge firm-level columns onto every row of the master, after email_source.
-    master = master.drop(columns=[c for c in PRIMARY_COLS if c in master.columns])
-    master = master.merge(flags, on="crd_number", how="left")
-    cols = [c for c in master.columns if c not in PRIMARY_COLS]
-    anchor = cols.index("email_source") + 1 if "email_source" in cols else len(cols)
-    master = master[cols[:anchor] + PRIMARY_COLS + cols[anchor:]]
-    master.to_csv(master_path, index=False)
+    _merge_and_write(master_path, flags, export_xlsx, id_col)
     print(f"\nWrote {master_path} (added columns: {', '.join(PRIMARY_COLS)})")
 
-    if export_xlsx:
-        from src.export_excel import export
-        export(csv_path=master_path)
+    if ckpt_path.exists():
+        ckpt_path.unlink()
 
 
 if __name__ == "__main__":
@@ -676,6 +755,11 @@ if __name__ == "__main__":
     p.add_argument("--cache-only", action="store_true", help="no network; cached pages only")
     p.add_argument("--dry-run", action="store_true", help="print results, write nothing")
     p.add_argument("--no-excel", action="store_true", help="skip re-exporting the xlsx")
+    p.add_argument("--restart", action="store_true",
+                   help="ignore an existing checkpoint and start over")
+    p.add_argument("--checkpoint-every", type=int, default=250,
+                   help="refresh master CSV + xlsx every N firms (0 = only at the end)")
     args = p.parse_args()
     run(master_path=args.master, limit=args.limit, cache_only=args.cache_only,
-        dry_run=args.dry_run, export_xlsx=not args.no_excel)
+        dry_run=args.dry_run, export_xlsx=not args.no_excel,
+        resume=not args.restart, checkpoint_every=args.checkpoint_every)

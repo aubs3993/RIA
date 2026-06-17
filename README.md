@@ -123,6 +123,123 @@ not as a percentage. (The fields are `5D(b)(1)` = HNW client count, `5D(b)(3)`
 
 Higher is better.
 
+## FDIC bank pipeline (`fdic_main.py`)
+
+A parallel pipeline that targets **FDIC-insured banks** instead of RIAs. It
+shares the same two scrapers and the same Zomma framework as the RIA pipeline —
+only the data source and the scoring inputs differ.
+
+Unlike Form ADV, the FDIC BankFind Suite is a **clean public JSON API**
+(`api.fdic.gov/banks/institutions`) that returns the bank's website (`WEBADDR`)
+directly, so there is nothing to download-and-unzip and no HTML to scrape for
+the institution data — Stage 1 is a thin paginated API client. ~4,300 active
+institutions, ~98% with a usable website.
+
+Stages:
+
+1. **Fetch + clean** (`src/fdic_fetch.py`) — page the institutions endpoint,
+   write raw CSV + a clean parquet whose columns match the shared scraper schema
+   (`cert_number`, `firm_legal_name`, `website`, `office_state`, `asset_total`,
+   `deposits`, `offices`, ...). `ASSET`/`DEP` arrive in $thousands and are
+   converted to dollars.
+2. **Filter** (`src/fdic_filter.py`) — bank ICP (asset band, state, website
+   required). `match_score` favours **small** banks so `--limit` scrapes the
+   most on-thesis banks first.
+3. **Scrape websites** — reuses `src.scrape_websites` verbatim (banks carry a
+   `cert_number` key instead of `crd_number`).
+4. **Primary-contact cascade** — reuses `src.scrape_primary_contact`.
+5. **Zomma Priority** (`src/fdic_zomma.py`) — the RIA thesis ported to bank
+   fields (see below).
+
+```powershell
+python .\fdic_main.py                      # full run (fetch -> filter -> scrape -> score)
+python .\fdic_main.py --skip-fetch         # reuse the cached clean parquet
+python .\fdic_main.py --skip-fetch --limit 25   # smoke test on 25 banks
+python .\fdic_main.py --state TX           # one state
+python .\fdic_main.py --skip-scrape        # stop after the ICP filter
+```
+
+Each stage also runs standalone (`python -m src.fdic_fetch`, `... fdic_filter`,
+`... fdic_zomma <master.csv>`).
+
+### Bank Zomma Priority
+
+Same 1–5 percentile buckets, same weights, same Fit / Segment / RPA-capable
+extras as the RIA scorer — with bank analogs for the two RIA signals FDIC data
+lacks (there is **no employee or client count** per bank):
+
+| RIA component (weight)        | FDIC analog                                                        |
+|-------------------------------|--------------------------------------------------------------------|
+| service complexity (0.30)     | **branch footprint** — more offices = more cores/portals to reconcile |
+| size: smaller better (0.35)   | smallness of **total assets** (ICP band)                           |
+| contact reachability (0.20)   | identical (scraped emails + named people)                          |
+| ops intensity (0.15)          | **assets-per-branch thinness** — more manual overhead per dollar   |
+
+Footprint and asset-size are anti-correlated for banks (~−0.73), so the
+footprint weight is dialed **below** the size weight (the "Balanced" tuning) to
+keep the focus on smaller, "too small for RPA" banks rather than the larger,
+already-automatable end.
+
+Weights and the saturation constants live at the top of `src/fdic_zomma.py` —
+run a scrape, eyeball the printed 1–5 distribution, and tune.
+
+### FDIC outputs
+
+- `data/fdic/raw/institutions_YYYYMMDD.csv` — raw API pull
+- `data/fdic/processed/banks_clean.parquet` — full clean dataset
+- `data/fdic/processed/banks_targeted.csv` — ICP-filtered banks with `match_score`
+- `data/fdic/enriched/fdic_targets_YYYYMMDD.csv` — final list, one row per
+  (bank, contact), with primary-contact and Zomma columns
+
+## NCUA credit-union pipeline (`ncua_main.py`)
+
+Targets **NCUA credit unions**. Same scrapers and Zomma framework again — but the
+data source is a **quarterly bulk download**, not an API, and it carries **no
+website**, so there's one extra stage.
+
+Stages:
+
+1. **Fetch + parse** (`src/ncua_fetch.py`) — auto-detect and download the latest
+   5300 Call Report quarter ZIP, read the profile (`FOICU.txt`) and the financial
+   schedules (`FS220.txt` → total assets `ACCT_010` + members `ACCT_083`;
+   `FS220A.txt` → employees `ACCT_564A/B`), count branches from the branch file,
+   and emit a clean parquet (`cu_number`, `firm_legal_name`, `asset_total`,
+   `members`, `employee_count`, `offices`, ...). Assets are already in dollars.
+2. **Pull official Profiles** (`src/ncua_profile.py`) — the call-report bulk data
+   has no URL, but NCUA's "Research a Credit Union" tool is backed by a public
+   JSON API (`mapping.ncua.gov/api/CreditUnionDetails/GetCreditUnionDetails/{charter}`)
+   that returns each CU's official **website**, **CEO/manager name**, and phone —
+   for **~95%** of credit unions. Free and government-sourced; cached to
+   `data/ncua/processed/ncua_profiles.csv`. The CEO name is reconciled onto the
+   `primary_contact_*` columns after scraping and matched to a scraped email, so
+   you get the official decision-maker plus their address. (A name-based
+   domain-guesser, `src/ncua_discover_sites.py`, remains available standalone as
+   a fallback for the ~5% the API leaves blank.)
+3. **Filter** (`src/ncua_filter.py`) — CU ICP (asset band, state, website found).
+4–5. **Scrape websites + primary contact** — the shared engines (CUs carry a
+   `cu_number` key).
+6. **Zomma Priority** (`src/ncua_zomma.py`) — the closest of the three sources to
+   the RIA model, because CUs report both members and employees: the ops signal
+   is genuine **members-per-employee density** (≙ RIA's clients-per-employee),
+   not a proxy. Footprint ← branches, size ← asset smallness, contact ← reachability.
+
+```powershell
+python .\ncua_main.py --limit 50          # smoke test (download, discover, scrape 50)
+python .\ncua_main.py                       # full run, latest quarter
+python .\ncua_main.py --skip-fetch          # reuse cached clean parquet
+python .\ncua_main.py --skip-discover       # reuse only already-cached sites
+python .\ncua_main.py --state TX
+```
+
+### NCUA outputs
+
+- `data/ncua/raw/call-report-data-YYYY-MM.zip` — the quarterly bulk download
+- `data/ncua/processed/cus_clean.parquet` — full clean dataset
+- `data/ncua/processed/ncua_profiles.csv` — NCUA Profile cache (website + CEO + phone)
+- `data/ncua/processed/discovered_sites.csv` — domain-guess fallback cache
+- `data/ncua/processed/cus_targeted.csv` — ICP-filtered CUs with `match_score`
+- `data/ncua/enriched/ncua_targets_YYYYMMDD.csv` — final list with contacts + Zomma
+
 ## Politeness
 
 - One in-flight request per domain at a time, 2-second delay between successive
