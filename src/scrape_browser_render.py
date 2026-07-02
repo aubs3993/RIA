@@ -160,6 +160,11 @@ async def _render_firm(ctx, firm: dict, sem: asyncio.Semaphore,
     async with sem:
         rp = await _robots_for(ctx, host)
         final_host = _read_redirect_meta(host)
+        rp_final = None  # robots parser for the redirect-target host, if different
+        if final_host and final_host != host:
+            # Redirect target already learned (e.g. by the httpx pass) — honor
+            # its robots for every page we render/cache under it.
+            rp_final = await _robots_for(ctx, final_host)
         candidates: list = []
         paths = ["/"] + [p for p in LEADERSHIP_PATHS if p != "/"]
         for path in paths:
@@ -172,7 +177,11 @@ async def _render_firm(ctx, firm: dict, sem: asyncio.Semaphore,
                     break
                 continue
             url = f"https://{host}{path}"
-            if not rp.can_fetch(config.USER_AGENT, url):
+            # ROBOTS_UA, not USER_AGENT: robotparser matches the token before
+            # "/", so the full string would check as "mozilla".
+            if not rp.can_fetch(config.ROBOTS_UA, url):
+                continue
+            if rp_final is not None and not rp_final.can_fetch(config.ROBOTS_UA, url):
                 continue
             page = await ctx.new_page()
             try:
@@ -193,6 +202,12 @@ async def _render_firm(ctx, firm: dict, sem: asyncio.Semaphore,
                     _write_redirect_meta(host, fh)
                     if fh in social:
                         return
+                    # Re-check robots on the redirect-target host before caching
+                    # anything from it (mirrors rp_final in the httpx scrapers).
+                    rp_final = await _robots_for(ctx, fh)
+                    if not rp_final.can_fetch(config.ROBOTS_UA, page.url):
+                        log.info("robots (post-redirect) disallow %s — skipping page", page.url)
+                        continue
                 _write_cache(final_host or host, path, html)
                 stats.pages_rendered += 1
                 candidates.extend(candidates_from_html(
@@ -244,8 +259,7 @@ def run(master_path: Path | None = None, limit: int | None = None,
         all_none: bool = False, rescan: bool = True, export_xlsx: bool = True,
         resume: bool = True) -> None:
     config.ensure_dirs()
-    master_path = Path(master_path) if master_path else (
-        config.ENRICHED_DIR / "ria_master_20260504.csv")
+    master_path = Path(master_path) if master_path else config.latest_ria_master()
     master = pd.read_csv(master_path, low_memory=False)
 
     targets = select_targets(master, all_none=all_none, limit=limit)

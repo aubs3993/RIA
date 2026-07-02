@@ -7,7 +7,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-USER_AGENT = "Mozilla/5.0 (compatible; RIA-Research/0.1; +mailto:aubrey3993@gmail.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; RIA-Research-Bot/0.1; +mailto:aubrey3993@gmail.com)"
+# Short product token for robots.txt checks. urllib.robotparser reduces the
+# agent it is given to the part before the first "/" (so the full USER_AGENT
+# above would be matched as "mozilla"). Pass this to every can_fetch() call;
+# keep USER_AGENT for the HTTP User-Agent header.
+ROBOTS_UA = "RIA-Research-Bot"
 
 # --- Paths --------------------------------------------------------------------
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -22,6 +27,17 @@ CLEAN_PARQUET = PROCESSED_DIR / "firms_clean.parquet"
 TARGETED_CSV = PROCESSED_DIR / "firms_targeted.csv"
 COLUMN_MAP_LOG = LOG_DIR / "column_mapping.log"
 SCRAPE_LOG = LOG_DIR / "scrape.log"
+
+
+def latest_ria_master() -> Path:
+    """Newest enriched RIA master CSV (the dated ria_master_YYYYMMDD.csv names
+    sort chronologically). Single source for the no-arg default that the
+    enrichment/export modules share, mirroring the glob-latest fallback in
+    fdic_zomma / ncua_zomma."""
+    cands = sorted(ENRICHED_DIR.glob("ria_master_*.csv"))
+    if not cands:
+        raise FileNotFoundError(f"No ria_master_*.csv found in {ENRICHED_DIR}")
+    return cands[-1]
 
 # --- SEC source ---------------------------------------------------------------
 SEC_INDEX_URL = (

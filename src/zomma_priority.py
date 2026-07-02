@@ -144,7 +144,7 @@ def compute(master: pd.DataFrame) -> pd.DataFrame:
 
 
 def run(master_path=None) -> None:
-    master_path = master_path or (config.ENRICHED_DIR / "ria_master_20260504.csv")
+    master_path = master_path or config.latest_ria_master()
     master = pd.read_csv(master_path)
 
     firms = compute(master)

@@ -310,9 +310,9 @@ def test_fetch_robots_404_allows_all():
         "http://example.com/robots.txt":  _RobotsResponse(404),
     })
     rp = asyncio.run(_fetch_robots(client, "example.com"))
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/team")
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/about-us")
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/team")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/about-us")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/")
 
 
 def test_fetch_robots_redirect_honored():
@@ -330,9 +330,9 @@ def test_fetch_robots_redirect_honored():
         "https://example.com/robots.txt": _RobotsResponse(200, body),
     })
     rp = asyncio.run(_fetch_robots(client, "example.com"))
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/team")
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/contact")
-    assert not rp.can_fetch(config.USER_AGENT, "https://example.com/api/foo")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/team")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/contact")
+    assert not rp.can_fetch(config.ROBOTS_UA, "https://example.com/api/foo")
 
 
 def test_fetch_robots_https_403_falls_back_to_http_200():
@@ -343,8 +343,8 @@ def test_fetch_robots_https_403_falls_back_to_http_200():
         "http://example.com/robots.txt":  _RobotsResponse(200, permissive),
     })
     rp = asyncio.run(_fetch_robots(client, "example.com"))
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/team")
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/team")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/")
 
 
 def test_fetch_robots_genuine_disallow_all_blocks():
@@ -354,8 +354,8 @@ def test_fetch_robots_genuine_disallow_all_blocks():
         "https://example.com/robots.txt": _RobotsResponse(200, body),
     })
     rp = asyncio.run(_fetch_robots(client, "example.com"))
-    assert not rp.can_fetch(config.USER_AGENT, "https://example.com/team")
-    assert not rp.can_fetch(config.USER_AGENT, "https://example.com/")
+    assert not rp.can_fetch(config.ROBOTS_UA, "https://example.com/team")
+    assert not rp.can_fetch(config.ROBOTS_UA, "https://example.com/")
 
 
 def test_fetch_robots_double_403_treated_as_block():
@@ -365,7 +365,7 @@ def test_fetch_robots_double_403_treated_as_block():
         "http://example.com/robots.txt":  _RobotsResponse(401),
     })
     rp = asyncio.run(_fetch_robots(client, "example.com"))
-    assert not rp.can_fetch(config.USER_AGENT, "https://example.com/team")
+    assert not rp.can_fetch(config.ROBOTS_UA, "https://example.com/team")
 
 
 def test_fetch_robots_transport_errors_both_schemes_allow_all():
@@ -375,7 +375,7 @@ def test_fetch_robots_transport_errors_both_schemes_allow_all():
         "http://example.com/robots.txt":  ConnectionError,
     })
     rp = asyncio.run(_fetch_robots(client, "example.com"))
-    assert rp.can_fetch(config.USER_AGENT, "https://example.com/team")
+    assert rp.can_fetch(config.ROBOTS_UA, "https://example.com/team")
 
 
 # ----- Email hygiene

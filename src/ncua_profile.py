@@ -101,7 +101,12 @@ def enrich(df: pd.DataFrame, icp: CreditUnionICP = DEFAULT_CU_ICP,
     qualified = out[band].sort_values("asset_total", ascending=True)
 
     cache = _load_cache()
-    done = set() if refresh else set(pd.to_numeric(cache["cu_number"], errors="coerce").dropna().astype("int64"))
+    # Only terminal statuses count as done — transient failures (http_5xx/429,
+    # timeouts) get retried on the next run; drop_duplicates keep="last" below
+    # replaces the stale failure row. "error" = the API said the charter itself
+    # is invalid, so refetching it would never help.
+    settled = cache[cache["status"].isin(["ok", "no_website", "error"])]
+    done = set() if refresh else set(pd.to_numeric(settled["cu_number"], errors="coerce").dropna().astype("int64"))
     todo = [int(c) for c in qualified["cu_number"].tolist() if int(c) not in done]
     if limit is not None:
         todo = todo[:limit]

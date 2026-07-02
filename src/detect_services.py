@@ -133,7 +133,7 @@ def _detect(text: str) -> dict[str, int]:
 
 
 def run(master_path=None) -> None:
-    master_path = master_path or (config.ENRICHED_DIR / "ria_master_20260504.csv")
+    master_path = master_path or config.latest_ria_master()
     firms = pd.read_csv(config.TARGETED_CSV)
 
     flag_rows: list[dict] = []

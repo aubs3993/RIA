@@ -35,6 +35,19 @@ INT_COLS = [
 # by Excel. International / malformed numbers are kept as their original text.
 PHONE_FMT = "000-000-0000"
 
+# Cells starting with these are treated as live formulas by Excel (openpyxl
+# stores leading-"=" strings as formula cells; "+", "-", "@" fire when the data
+# is opened as CSV). Scraped page text (contact names/titles) is third-party
+# controlled, so neutralize at write time — classic spreadsheet-formula injection.
+_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _defang_cell(v):
+    """Prefix an apostrophe so Excel keeps the value as inert text."""
+    if isinstance(v, str) and v.startswith(_FORMULA_PREFIXES):
+        return "'" + v
+    return v
+
 
 def _normalize_phone(v):
     """Return a US phone as a 10-digit int (drops a leading country-code 1), or
@@ -53,6 +66,11 @@ def _normalize_phone(v):
 def _write_sheet(xl, df: pd.DataFrame, sheet_name: str) -> None:
     """Write one dataframe to a sheet: text-safe IDs, formatted dollars, a bold +
     frozen header (row 1 and the firm-name column), autofilter, capped widths."""
+    obj_cols = [c for c in df.columns if df[c].dtype == object]
+    if obj_cols:
+        df = df.copy()
+        for c in obj_cols:
+            df[c] = df[c].map(_defang_cell)
     df.to_excel(xl, index=False, sheet_name=sheet_name)
     ws = xl.sheets[sheet_name]
     col_of = {cell.value: cell.column for cell in ws[1]}
@@ -85,7 +103,7 @@ def _write_sheet(xl, df: pd.DataFrame, sheet_name: str) -> None:
 
 
 def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
-    csv_path = Path(csv_path) if csv_path else (config.ENRICHED_DIR / "ria_master_20260504.csv")
+    csv_path = Path(csv_path) if csv_path else config.latest_ria_master()
     xlsx_path = Path(xlsx_path) if xlsx_path else csv_path.with_suffix(".xlsx")
 
     # Read ID/zip/phone columns as strings up front so leading zeros / formats survive.
@@ -108,14 +126,19 @@ def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
 
+    # Entity key: RIA masters carry crd_number, FDIC banks cert_number, NCUA
+    # credit unions cu_number. First present wins (as in scrape_primary_contact).
+    id_col = next((c for c in ("crd_number", "cert_number", "cu_number")
+                   if c in df.columns), None)
+
     # --- pre-sort: best targets first, each firm's contact rows kept together,
     #     and the emailable/named contact floated to the top of the firm block.
     he = df["contact_email"].notna() & (df["contact_email"].astype(str).str.strip() != "")
     hn = df["contact_name"].notna()
     by, asc = [], []
     for col, ascending in [("Zomma Priority", False), ("Zomma Fit", False),
-                           ("match_score", False), ("crd_number", True)]:
-        if col in df.columns:
+                           ("match_score", False), (id_col, True)]:
+        if col is not None and col in df.columns:
             by.append(col)
             asc.append(ascending)
     by += ["_he", "_hn"]
@@ -127,19 +150,24 @@ def export(csv_path: Path | None = None, xlsx_path: Path | None = None) -> Path:
 
     # "Company Only" tab: drop the per-contact columns and collapse to one row
     # per firm. drop_duplicates keeps the first (already-sorted) row, so the
-    # firm order matches the master tab exactly.
+    # firm order matches the master tab exactly. Skipped when no entity-id
+    # column exists (nothing to collapse on).
     contact_cols = ["contact_name", "contact_title", "contact_email", "email_source"]
-    company = (df.drop(columns=[c for c in contact_cols if c in df.columns])
-                 .drop_duplicates(subset="crd_number", keep="first")
-                 .reset_index(drop=True))
+    company = None
+    if id_col is not None:
+        company = (df.drop(columns=[c for c in contact_cols if c in df.columns])
+                     .drop_duplicates(subset=id_col, keep="first")
+                     .reset_index(drop=True))
 
     with pd.ExcelWriter(xlsx_path, engine="openpyxl") as xl:
         _write_sheet(xl, df, "RIA Master")
-        _write_sheet(xl, company, "Company Only")
+        if company is not None:
+            _write_sheet(xl, company, "Company Only")
 
     print(f"Wrote {xlsx_path}")
     print(f"  RIA Master   : {len(df):,} rows x {df.shape[1]} cols  (one row per firm-contact)")
-    print(f"  Company Only : {len(company):,} rows x {company.shape[1]} cols  (one row per firm)")
+    if company is not None:
+        print(f"  Company Only : {len(company):,} rows x {company.shape[1]} cols  (one row per firm)")
     return xlsx_path
 
 

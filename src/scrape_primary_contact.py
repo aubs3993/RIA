@@ -504,14 +504,21 @@ async def _search_one_firm(
                     if _read_cache(cache_host, path) is not None:
                         continue  # already scanned in the cache pass
                     url = f"https://{host}{path}"
-                    if not rp.can_fetch(config.USER_AGENT, url):
+                    # ROBOTS_UA, not USER_AGENT: robotparser matches the token
+                    # before "/", so the full string would check as "mozilla".
+                    if not rp.can_fetch(config.ROBOTS_UA, url):
                         continue
-                    if rp_final is not None and not rp_final.can_fetch(config.USER_AGENT, url):
+                    if rp_final is not None and not rp_final.can_fetch(config.ROBOTS_UA, url):
                         continue
                     wait = cfg.per_domain_delay_seconds - (time.monotonic() - last_ts)
                     if wait > 0:
                         await asyncio.sleep(wait)
                     status, html, fu = await _fetch_with_retries(client, url, cfg)
+                    if status is None:
+                        # http-only host (no TLS listener / broken cert) — retry
+                        # plain http, mirroring _fetch_robots' scheme fallback.
+                        status, html, fu = await _fetch_with_retries(
+                            client, f"http://{host}{path}", cfg)
                     last_ts = time.monotonic()
                     if status != 200 or not html:
                         continue
@@ -523,7 +530,7 @@ async def _search_one_firm(
                         if fh in social:
                             break
                         rp_final = await _fetch_robots(client, fh)
-                        if not rp_final.can_fetch(config.USER_AGENT, fu):
+                        if not rp_final.can_fetch(config.ROBOTS_UA, fu):
                             continue
                     if cfg.cache_pages:
                         _write_cache(final_host or host, path, html)
@@ -666,8 +673,7 @@ def run(master_path: Path | None = None, limit: int | None = None,
         scraper_cfg: config.ScraperConfig = config.DEFAULT_SCRAPER,
         resume: bool = True, checkpoint_every: int = 250) -> None:
     config.ensure_dirs()
-    master_path = Path(master_path) if master_path else (
-        config.ENRICHED_DIR / "ria_master_20260504.csv")
+    master_path = Path(master_path) if master_path else config.latest_ria_master()
     master = pd.read_csv(master_path, low_memory=False)
 
     # Per-entity key: RIA masters carry crd_number, FDIC banks cert_number,

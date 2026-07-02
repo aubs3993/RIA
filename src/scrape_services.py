@@ -117,9 +117,11 @@ async def _crawl_one(firm: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
                 continue  # already have this page cached
 
             url_https = urljoin(f"https://{host}/", path)
-            if not rp.can_fetch(config.USER_AGENT, url_https):
+            # ROBOTS_UA, not USER_AGENT: robotparser matches the token before
+            # "/", so the full string would check as "mozilla".
+            if not rp.can_fetch(config.ROBOTS_UA, url_https):
                 continue
-            if rp_final is not None and not rp_final.can_fetch(config.USER_AGENT, url_https):
+            if rp_final is not None and not rp_final.can_fetch(config.ROBOTS_UA, url_https):
                 continue
 
             wait = cfg.per_domain_delay_seconds - (time.monotonic() - last_ts)
@@ -137,7 +139,7 @@ async def _crawl_one(firm: dict, client: httpx.AsyncClient, sem: asyncio.Semapho
                     final_host = fh
                     _write_redirect_meta(host, fh)
                     rp_final = await _fetch_robots(client, fh)
-                    if not rp_final.can_fetch(config.USER_AGENT, fu):
+                    if not rp_final.can_fetch(config.ROBOTS_UA, fu):
                         continue
 
             _write_cache(final_host or host, path, html)

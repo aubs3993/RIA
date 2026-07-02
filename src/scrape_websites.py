@@ -493,8 +493,9 @@ async def _scrape_one_firm(
 ) -> FirmScrapeResult:
     """Scrape one firm.
 
-    `redirect_owner` is a shared dict {final_host: crd_number_of_first_owner}
-    used to ensure that when two firms' filed sites both redirect to the same
+    `redirect_owner` is a shared dict {host: crd_number_of_first_owner} keyed
+    by both filed and post-redirect hosts. It ensures that when two firms file
+    the identical website, or their filed sites redirect to the same
     destination, only the first firm gets the contacts. Subsequent firms are
     skipped with reason "shared_redirect_target". Pass None when scraping
     standalone (e.g. tests).
@@ -538,6 +539,19 @@ async def _scrape_one_firm(
             result.skipped_reason = "shared_redirect_target"
             return result
 
+    # Claim the FILED host up front. Two firms that file the identical website
+    # (common for affiliated RIAs) must not both scrape it and both receive the
+    # same contacts — the first claimant wins and later firms are skipped before
+    # any cache read or network fetch (which also keeps requests to that domain
+    # sequential rather than concurrent across firms).
+    if redirect_owner is not None:
+        owner = redirect_owner.setdefault(host, crd)
+        if owner != crd:
+            log.warning("filed host %s already owned by CRD %s — skipping CRD %s",
+                        host, owner, crd)
+            result.skipped_reason = "shared_redirect_target"
+            return result
+
     async with sem:
         # robots.txt for the FILED host (we'll re-check after we know the final host).
         rp = await _fetch_robots(client, host)
@@ -555,7 +569,10 @@ async def _scrape_one_firm(
             url_https = url.replace("http://", "https://", 1)
             attempted += 1
 
-            if not rp.can_fetch(config.USER_AGENT, url_https):
+            # ROBOTS_UA (not the full Mozilla-style USER_AGENT): robotparser
+            # matches on the token before "/", so the full string would apply
+            # rules aimed at "mozilla" instead of ours.
+            if not rp.can_fetch(config.ROBOTS_UA, url_https):
                 log.info("robots disallow %s%s — skipping", host, path)
                 robots_blocked += 1
                 continue
@@ -573,6 +590,11 @@ async def _scrape_one_firm(
                 if wait > 0:
                     await asyncio.sleep(wait)
                 status, html, fu = await _fetch_with_retries(client, url_https, cfg)
+                if status is None:
+                    # No TLS listener / broken cert — some small firms are still
+                    # http-only. Fall back to plain http, mirroring _fetch_robots'
+                    # https-then-http scheme fallback.
+                    status, html, fu = await _fetch_with_retries(client, url, cfg)
                 last_request_ts = time.monotonic()
                 if status is None:
                     log.warning("fetch failed (transport) %s%s", host, path)
@@ -610,7 +632,7 @@ async def _scrape_one_firm(
 
                         # Re-check robots on the FINAL host before trusting the page.
                         rp_final = await _fetch_robots(client, fh)
-                        if not rp_final.can_fetch(config.USER_AGENT, fu):
+                        if not rp_final.can_fetch(config.ROBOTS_UA, fu):
                             log.info("robots (post-redirect) disallow %s — skipping page", fu)
                             continue
                     elif fh:
@@ -649,6 +671,15 @@ async def _scrape_one_firm(
 # ---------- Public entry point ----------------------------------------------
 
 
+def _firm_key(d: dict) -> str:
+    """Stable per-firm result key: first entity id present (RIA crd_number,
+    FDIC cert_number, NCUA cu_number, then sec_number), else the legal name.
+    Single source of truth — scrape_websites attaches it as _key and
+    _flatten_results joins results back on it."""
+    return str(d.get("crd_number") or d.get("cert_number") or d.get("cu_number")
+               or d.get("sec_number") or d.get("firm_legal_name") or id(d))
+
+
 async def _scrape_all(
     firms: pd.DataFrame,
     cfg: config.ScraperConfig,
@@ -660,9 +691,9 @@ async def _scrape_all(
                           max_keepalive_connections=cfg.max_concurrent_domains)
 
     results: dict[str, FirmScrapeResult] = {}
-    # final_host -> CRD of first firm to claim it. Subsequent firms whose filed
-    # site redirects to the same destination get skipped to prevent contact
-    # duplication across firm rows.
+    # filed or final host -> CRD of first firm to claim it. Subsequent firms
+    # that file the same site, or whose filed site redirects to the same
+    # destination, get skipped to prevent contact duplication across firm rows.
     redirect_owner: dict[str, str] = {}
 
     async def _run_one(key: str, firm_dict: dict) -> tuple[str, FirmScrapeResult]:
@@ -685,7 +716,9 @@ async def _scrape_all(
         coros = []
         for _, row in firms.iterrows():
             d = row.to_dict()
-            key = str(d.get("crd_number") or d.get("cert_number") or d.get("sec_number") or d.get("firm_legal_name") or id(d))
+            # Reuse the _key scrape_websites attached; derive only when absent
+            # (e.g. tests calling _scrape_all directly).
+            key = d.get("_key") or _firm_key(d)
             coros.append(_run_one(key, d))
 
         for fut in atqdm.as_completed(coros, total=len(coros), desc="scraping"):
@@ -715,12 +748,8 @@ def scrape_websites(
     log.info("Scraping %d firms (cfg: %d parallel domains, %.1fs delay)",
              len(firms), scraper_cfg.max_concurrent_domains, scraper_cfg.per_domain_delay_seconds)
 
-    # Build keys identical to those used inside _scrape_all
-    keys: list[str] = []
-    for _, row in firms.iterrows():
-        d = row.to_dict()
-        keys.append(str(d.get("crd_number") or d.get("cert_number") or d.get("sec_number") or d.get("firm_legal_name") or id(d)))
-    firms = firms.assign(_key=keys)
+    # Attach each firm's result key; _scrape_all reads it back off the row.
+    firms = firms.assign(_key=[_firm_key(row.to_dict()) for _, row in firms.iterrows()])
 
     results = asyncio.run(_scrape_all(firms, scraper_cfg))
 
