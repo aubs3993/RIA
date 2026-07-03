@@ -11,7 +11,9 @@ text files keyed on CU_NUMBER. We:
     (`cu_number` key, `firm_legal_name`, `office_state`, `asset_total`, ...).
 
 `website` is intentionally left blank here — NCUA data carries no URL. Run
-src.ncua_discover_sites next to populate it before scraping.
+src.ncua_profile next (NCUA Profile API, ~95% coverage) to populate it before
+scraping; src.ncua_discover_sites is a standalone name-guess fallback for the
+remainder.
 
 Run standalone:
     python -m src.ncua_fetch                 # latest quarter (download if needed)
@@ -133,7 +135,7 @@ def _to_clean(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     out["cu_number"] = pd.to_numeric(col("CU_NUMBER"), errors="coerce").astype("Int64")
     out["firm_legal_name"] = col("CU_NAME").astype("string").str.replace(r"\s+", " ", regex=True).str.strip()
-    out["website"] = pd.NA   # not in NCUA data — populated by ncua_discover_sites
+    out["website"] = pd.NA   # not in NCUA data — populated by ncua_profile (fallback: ncua_discover_sites)
     out["office_street"] = col("STREET").astype("string").str.strip()
     out["office_city"] = col("CITY").astype("string").str.strip()
     out["office_state"] = col("STATE").astype("string").str.strip()

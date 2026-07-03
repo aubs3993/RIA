@@ -69,18 +69,30 @@ def _log_smallness(x, lo, hi):
     return 1.0 - (np.log(x) - np.log(lo)) / (np.log(hi) - np.log(lo))
 
 
-def compute(master: pd.DataFrame) -> pd.DataFrame:
-    """Return a firm-level frame: crd_number, the four components, composite,
-    Zomma Priority — plus the inputs, for inspection."""
-    svc_cols = list(SERVICE_WEIGHTS)
+def contact_scores(master: pd.DataFrame, key: str) -> pd.DataFrame:
+    """Collapse the per-contact master to one row per `key` (crd_number /
+    cert_number / cu_number) and attach the contact-richness signal:
+    n_contacts (rows with an email), n_named (of those, with a name) and
+    s_contact. Shared by all three Zomma scorers (RIA/FDIC/NCUA) so a tuning
+    change — e.g. the 5-contact saturation — lands everywhere at once."""
     has_email = master["contact_email"].notna() & (master["contact_email"].astype(str) != "")
 
-    g = master.groupby("crd_number")
+    g = master.groupby(key)
     firms = g.first().reset_index()
     firms["n_contacts"] = g.apply(lambda d: int(has_email.loc[d.index].sum())).values
     firms["n_named"] = g.apply(
         lambda d: int((d["contact_name"].notna() & has_email.loc[d.index]).sum())
     ).values
+    firms["s_contact"] = (0.7 * np.minimum(firms["n_contacts"], 5) / 5
+                          + 0.3 * np.minimum(firms["n_named"], 3) / 3)
+    return firms
+
+
+def compute(master: pd.DataFrame) -> pd.DataFrame:
+    """Return a firm-level frame: crd_number, the four components, composite,
+    Zomma Priority — plus the inputs, for inspection."""
+    svc_cols = list(SERVICE_WEIGHTS)
+    firms = contact_scores(master, "crd_number")
 
     # 1) Service complexity (blank/unreadable services -> 0, i.e. not a known
     #    multi-service target).
@@ -92,9 +104,7 @@ def compute(master: pd.DataFrame) -> pd.DataFrame:
     size_emp = _log_smallness(firms["employee_count"].clip(lower=1), EMP_LO, EMP_HI)
     firms["s_size"] = 0.6 * size_aum + 0.4 * size_emp
 
-    # 3) Contact richness — more, and named, contacts = more reachable.
-    firms["s_contact"] = (0.7 * np.minimum(firms["n_contacts"], 5) / 5
-                          + 0.3 * np.minimum(firms["n_named"], 3) / 3)
+    # 3) Contact richness (s_contact) — computed in contact_scores() above.
 
     # 4) Operational intensity — clients per employee (the pilot's pain signal).
     clients = firms["individual_clients"].fillna(0) + firms["hnw_clients"].fillna(0)

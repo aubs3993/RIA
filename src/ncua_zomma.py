@@ -23,7 +23,7 @@ import pandas as pd
 
 import config
 from src.utils import get_logger
-from src.zomma_priority import _bucket, _log_smallness
+from src.zomma_priority import _bucket, _log_smallness, contact_scores
 
 log = get_logger("ncua_zomma", config.LOG_DIR / "pipeline.log")
 
@@ -41,14 +41,7 @@ GOOD_FIT_MIN = 4
 
 
 def compute(master: pd.DataFrame) -> pd.DataFrame:
-    has_email = master["contact_email"].notna() & (master["contact_email"].astype(str) != "")
-
-    g = master.groupby("cu_number")
-    firms = g.first().reset_index()
-    firms["n_contacts"] = g.apply(lambda d: int(has_email.loc[d.index].sum())).values
-    firms["n_named"] = g.apply(
-        lambda d: int((d["contact_name"].notna() & has_email.loc[d.index]).sum())
-    ).values
+    firms = contact_scores(master, "cu_number")
 
     asset = pd.to_numeric(firms["asset_total"], errors="coerce")
     offices = pd.to_numeric(firms["offices"], errors="coerce").fillna(1).clip(lower=1)
@@ -59,9 +52,7 @@ def compute(master: pd.DataFrame) -> pd.DataFrame:
     firms["s_footprint"] = (np.log(offices) / np.log(FOOTPRINT_SAT)).clip(0.0, 1.0)
     # 2) Size fit — smaller assets are better.
     firms["s_size"] = _log_smallness(asset.fillna(ASSET_HI), ASSET_LO, ASSET_HI)
-    # 3) Contact richness — more, and named, contacts = more reachable.
-    firms["s_contact"] = (0.7 * np.minimum(firms["n_contacts"], 5) / 5
-                          + 0.3 * np.minimum(firms["n_named"], 3) / 3)
+    # 3) Contact richness (s_contact) — computed in contact_scores() above.
     # 4) Ops intensity — members per employee (the pilot's manual-entry pain signal).
     firms["members_per_emp"] = members / employees
     firms["s_ops"] = firms["members_per_emp"].rank(pct=True)

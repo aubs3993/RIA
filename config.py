@@ -89,8 +89,9 @@ DEFAULT_BANK_ICP = BankICP()
 # No live API: a quarterly ZIP of comma-delimited text files keyed on CU_NUMBER.
 # Profile (name/address) is in FOICU.txt; financials are ACCT_* codes spread
 # across FS220*.txt schedules. There is NO website or email field anywhere in
-# the data, so websites must be discovered (src/ncua_discover_sites.py) before
-# the shared contact scrapers can run.
+# the data, so websites (and CEO names) come from the NCUA Profile API
+# (src/ncua_profile.py, ~95% coverage) before the shared contact scrapers can
+# run; src/ncua_discover_sites.py is only a standalone name-guess fallback.
 #   page: https://ncua.gov/analysis/credit-union-corporate-call-report-data/quarterly-data
 NCUA_QUARTERLY_URL = "https://www.ncua.gov/files/publications/analysis/call-report-data-{ym}.zip"
 

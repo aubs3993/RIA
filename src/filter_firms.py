@@ -13,7 +13,8 @@ import pandas as pd
 
 import config
 from config import ICP, DEFAULT_ICP
-from src.utils import domain_of, get_logger
+from src.fdic_filter import state_mask, website_mask   # shared ICP gate math
+from src.utils import get_logger
 
 log = get_logger("filter_firms", config.LOG_DIR / "pipeline.log")
 
@@ -74,25 +75,8 @@ def filter_firms(df: pd.DataFrame, icp: ICP = DEFAULT_ICP, output_path: Path | N
     hnw_cnt = pd.to_numeric(f.get("hnw_clients", pd.Series(pd.NA, index=f.index)), errors="coerce").fillna(0)
     hnw_ok = hnw_aum.ge(icp.min_hnw_aum) & hnw_cnt.ge(icp.min_hnw_clients)
 
-    if icp.states:
-        states_upper = {s.upper() for s in icp.states}
-        state_ok = f.get("office_state", pd.Series("", index=f.index)).fillna("").str.upper().isin(states_upper)
-    else:
-        state_ok = pd.Series(True, index=f.index)
-
-    website_series = f.get("website", pd.Series("", index=f.index)).astype("string")
-    website_present = website_series.notna() & website_series.str.len().gt(0)
-
-    # Treat social-media URLs as "no website" — never yields advisor emails.
-    blocklist = {d.lower() for d in getattr(config, "SOCIAL_URL_BLOCKLIST", [])}
-    website_host = website_series.fillna("").map(lambda u: domain_of(u) or "")
-    is_social = website_host.isin(blocklist)
-    website_present = website_present & ~is_social
-
-    if icp.exclude_no_website:
-        website_ok = website_present
-    else:
-        website_ok = pd.Series(True, index=f.index)
+    state_ok = state_mask(f, icp.states)
+    website_ok = website_mask(f, icp.exclude_no_website)
 
     mask = aum_ok & emp_ok & hnw_ok & state_ok & website_ok
     out = f[mask].copy()

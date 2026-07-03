@@ -87,7 +87,12 @@ def clean_title(t):
 
 def name_email_consistent(name: str, email: str) -> bool:
     """True iff the email's local part plausibly belongs to this name
-    (jane.doe@, jdoe@, j.doe@, janedoe@, doe@, jane@ ...)."""
+    (jane.doe@, jdoe@, j.doe@, janedoe@, doe@, jane@ ...).
+
+    Intentionally broader than src.scrape_primary_contact.match_email_by_name:
+    this is a consistency CHECK on a (name, email) pair we already scraped
+    together, not a matcher picking one email out of many, so bare-initials and
+    bare first/last locals are acceptable here."""
     toks = [re.sub(r"[^a-z]", "", t.lower()) for t in name.split()]
     toks = [t for t in toks if len(t) >= 2]
     if len(toks) < 2:

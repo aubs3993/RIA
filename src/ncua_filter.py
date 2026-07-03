@@ -12,8 +12,8 @@ import pandas as pd
 
 import config
 from config import CreditUnionICP, DEFAULT_CU_ICP
-from src.fdic_filter import _asset_smallness   # identical smallness math
-from src.utils import domain_of, get_logger
+from src.fdic_filter import _asset_smallness, state_mask, website_mask  # identical gate math
+from src.utils import get_logger
 
 log = get_logger("ncua_filter", config.LOG_DIR / "pipeline.log")
 
@@ -28,18 +28,8 @@ def filter_cus(df: pd.DataFrame, icp: CreditUnionICP = DEFAULT_CU_ICP,
     asset_ok = pd.to_numeric(f.get("asset_total", pd.Series(pd.NA, index=f.index)),
                              errors="coerce").between(icp.asset_min, icp.asset_max, inclusive="both")
 
-    if icp.states:
-        states_upper = {s.upper() for s in icp.states}
-        state_ok = f.get("office_state", pd.Series("", index=f.index)).fillna("").str.upper().isin(states_upper)
-    else:
-        state_ok = pd.Series(True, index=f.index)
-
-    website_series = f.get("website", pd.Series(pd.NA, index=f.index)).astype("string")
-    website_present = website_series.notna() & website_series.str.len().gt(0)
-    blocklist = {d.lower() for d in getattr(config, "SOCIAL_URL_BLOCKLIST", [])}
-    website_host = website_series.fillna("").map(lambda u: domain_of(u) or "")
-    website_present = website_present & ~website_host.isin(blocklist)
-    website_ok = website_present if icp.exclude_no_website else pd.Series(True, index=f.index)
+    state_ok = state_mask(f, icp.states)
+    website_ok = website_mask(f, icp.exclude_no_website)
 
     out = f[asset_ok & state_ok & website_ok].copy()
     out["match_score"] = out["asset_total"].apply(

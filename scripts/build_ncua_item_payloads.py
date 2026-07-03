@@ -17,6 +17,7 @@ import re
 import pandas as pd
 
 import config
+from src.scrape_primary_contact import match_email_by_name
 from build_fdic_item_payloads import (
     is_real_name, name_email_consistent, derive_name, clean_title,
     compose_address, LOW_VALUE,
@@ -42,22 +43,11 @@ def clean_person_name(nm):
 
 def resolve_ceo_email(ceo_name, emails, primary_email):
     """CEO email from primary_contact_email, else match the name against the CU's
-    scraped emails (flast / f.last / first.last / firstlast / last ...)."""
+    scraped emails with the pipeline's canonical matcher — the same rule
+    reconcile_ceo applied, so standalone rebuilds agree with the scrape stage."""
     if isinstance(primary_email, str) and "@" in primary_email:
         return primary_email.strip().lower()
-    toks = [re.sub(r"[^a-z]", "", t.lower()) for t in (ceo_name or "").split()]
-    toks = [t for t in toks if len(t) >= 2]
-    if len(toks) < 2:
-        return None
-    first, last = toks[0], toks[-1]
-    cands = {
-        f"{first}.{last}", f"{first}{last}", f"{first[0]}{last}", f"{first[0]}.{last}",
-        f"{last}{first[0]}", f"{first}{last[0]}", f"{last}.{first}", f"{first}.{last[0]}",
-    }
-    for e in emails:
-        if e.split("@", 1)[0].lower() in cands:
-            return e
-    return None
+    return match_email_by_name(ceo_name, emails)
 
 
 def main():

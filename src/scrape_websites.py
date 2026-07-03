@@ -19,8 +19,7 @@ import urllib.robotparser
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 import pandas as pd
@@ -336,9 +335,6 @@ def extract_contacts_from_html(
     if has_personal:
         found = {e: c for e, c in found.items() if not _is_low_value_email(c.email, config.DEFAULT_SCRAPER)}
 
-    # Tag with the calling page label so logs show which path produced the hit.
-    for c in found.values():
-        c.source = c.source  # keep source label as-is; source_label kept for log context
     if source_label and found:
         log.debug("Extracted %d emails from %s", len(found), source_label)
 
@@ -531,8 +527,8 @@ async def _scrape_one_firm(
         result.skipped_reason = "redirected_to_social"
         return result
     if cached_final and redirect_owner is not None:
-        owner = redirect_owner.get(cached_final)
-        if owner is not None and owner != crd:
+        owner = redirect_owner.setdefault(cached_final, crd)
+        if owner != crd:
             log.warning("shared redirect target %s already owned by CRD %s — skipping CRD %s",
                         cached_final, owner, crd)
             result.final_domain = cached_final
@@ -561,7 +557,11 @@ async def _scrape_one_firm(
         last_request_ts = 0.0
         robots_blocked = 0
         attempted = 0
-        final_host: str | None = None
+        # Seed the final host from the redirect sidecar so cache lookups hit the
+        # post-redirect directory immediately instead of re-fetching every run.
+        final_host: str | None = cached_final
+        if final_host:
+            result.final_domain = final_host
         rp_final = None  # robots parser for the final host, if different
 
         for path in cfg.team_paths:
@@ -574,6 +574,12 @@ async def _scrape_one_firm(
             # rules aimed at "mozilla" instead of ours.
             if not rp.can_fetch(config.ROBOTS_UA, url_https):
                 log.info("robots disallow %s%s — skipping", host, path)
+                robots_blocked += 1
+                continue
+            # Once a redirect is known, the FINAL host's robots apply to every
+            # subsequent page too (mirrors scrape_primary_contact).
+            if rp_final is not None and not rp_final.can_fetch(config.ROBOTS_UA, url_https):
+                log.info("robots (final host %s) disallow %s — skipping", final_host, path)
                 robots_blocked += 1
                 continue
 
@@ -640,7 +646,8 @@ async def _scrape_one_firm(
                         result.final_domain = fh
                         if redirect_owner is not None:
                             redirect_owner.setdefault(fh, crd)
-                _write_cache(final_host or host, path, html)
+                if cfg.cache_pages:
+                    _write_cache(final_host or host, path, html)
 
             result.fetched_paths.append(path)
             page_host = final_host or host  # validate emails against where the bytes came from

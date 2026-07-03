@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
+from pathlib import Path
 
 import httpx
 import pandas as pd
@@ -57,8 +59,16 @@ def _normalize_record(charter, raw: dict) -> dict:
 async def _fetch_one(client: httpx.AsyncClient, sem: asyncio.Semaphore, charter: int) -> dict:
     async with sem:
         try:
-            r = await client.get(DETAIL_URL.format(charter), timeout=15.0,
-                                 headers={"Accept": "application/json"})
+            for attempt in range(3):
+                r = await client.get(DETAIL_URL.format(charter), timeout=15.0,
+                                     headers={"Accept": "application/json"})
+                if r.status_code == 429 or r.status_code >= 500:
+                    # Throttled / transient server error — bounded backoff then retry.
+                    await asyncio.sleep(1.0 * (2 ** attempt))
+                    continue
+                break
+            # Courtesy pacing between requests (the FDIC fetcher sleeps 0.5s/page).
+            await asyncio.sleep(0.2)
             if r.status_code != 200:
                 return {"cu_number": charter, "website": None, "ceo_name": None,
                         "phone": None, "status": f"http_{r.status_code}"}
@@ -157,7 +167,12 @@ def reconcile_ceo(master_path) -> None:
         matched_n += bool(matched)
         updated += 1
 
-    master.to_csv(master_path, index=False)
+    # Atomic rewrite (tmp + replace) — the master is the product of a multi-hour
+    # run, so never leave it truncated by a crash/Ctrl-C mid-write.
+    master_path = Path(master_path)
+    tmp = master_path.with_suffix(".csv.tmp")
+    master.to_csv(tmp, index=False)
+    os.replace(tmp, master_path)
     print(f"\n[ncua_profile] reconciled CEO onto {updated:,} credit unions "
           f"({matched_n:,} with a name-matched CEO email; the rest have the CEO "
           f"name + a general inbox in the contact rows)")

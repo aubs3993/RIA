@@ -38,6 +38,32 @@ def _asset_smallness(asset: float, lo: float, hi: float) -> float:
     return 1.0 - (math.log(asset) - log_lo) / (log_hi - log_lo)
 
 
+def state_mask(df: pd.DataFrame, states: list[str] | None) -> pd.Series:
+    """True where office_state is in `states`; all True when no state filter.
+
+    Shared by all three source filters (RIA/FDIC/NCUA) so the state gate cannot
+    drift between them.
+    """
+    if not states:
+        return pd.Series(True, index=df.index)
+    states_upper = {s.upper() for s in states}
+    return df.get("office_state", pd.Series("", index=df.index)).fillna("").str.upper().isin(states_upper)
+
+
+def website_mask(df: pd.DataFrame, exclude_no_website: bool) -> pd.Series:
+    """True where the firm has a usable website; all True when the ICP does not
+    require one. Social-media URLs count as "no website" — they never yield
+    advisor emails. Shared by all three source filters (RIA/FDIC/NCUA).
+    """
+    if not exclude_no_website:
+        return pd.Series(True, index=df.index)
+    website_series = df.get("website", pd.Series("", index=df.index)).astype("string")
+    website_present = website_series.notna() & website_series.str.len().gt(0)
+    blocklist = {d.lower() for d in getattr(config, "SOCIAL_URL_BLOCKLIST", [])}
+    website_host = website_series.fillna("").map(lambda u: domain_of(u) or "")
+    return website_present & ~website_host.isin(blocklist)
+
+
 def filter_banks(df: pd.DataFrame, icp: BankICP = DEFAULT_BANK_ICP,
                  output_path: Path | None = None) -> pd.DataFrame:
     config.ensure_fdic_dirs()
@@ -49,18 +75,8 @@ def filter_banks(df: pd.DataFrame, icp: BankICP = DEFAULT_BANK_ICP,
     asset_ok = pd.to_numeric(f.get("asset_total", pd.Series(pd.NA, index=f.index)),
                              errors="coerce").between(icp.asset_min, icp.asset_max, inclusive="both")
 
-    if icp.states:
-        states_upper = {s.upper() for s in icp.states}
-        state_ok = f.get("office_state", pd.Series("", index=f.index)).fillna("").str.upper().isin(states_upper)
-    else:
-        state_ok = pd.Series(True, index=f.index)
-
-    website_series = f.get("website", pd.Series("", index=f.index)).astype("string")
-    website_present = website_series.notna() & website_series.str.len().gt(0)
-    blocklist = {d.lower() for d in getattr(config, "SOCIAL_URL_BLOCKLIST", [])}
-    website_host = website_series.fillna("").map(lambda u: domain_of(u) or "")
-    website_present = website_present & ~website_host.isin(blocklist)
-    website_ok = website_present if icp.exclude_no_website else pd.Series(True, index=f.index)
+    state_ok = state_mask(f, icp.states)
+    website_ok = website_mask(f, icp.exclude_no_website)
 
     mask = asset_ok & state_ok & website_ok
     out = f[mask].copy()

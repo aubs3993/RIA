@@ -29,8 +29,8 @@ import pandas as pd
 
 import config
 from src.utils import get_logger
-# Reuse the RIA scorer's primitives so the bucketing/smallness math is identical.
-from src.zomma_priority import _bucket, _log_smallness
+# Reuse the RIA scorer's primitives so the bucketing/smallness/contact math is identical.
+from src.zomma_priority import _bucket, _log_smallness, contact_scores
 
 log = get_logger("fdic_zomma", config.LOG_DIR / "pipeline.log")
 
@@ -60,14 +60,7 @@ GOOD_FIT_MIN = 4
 def compute(master: pd.DataFrame) -> pd.DataFrame:
     """Return a bank-level frame: cert_number, the four components, composite,
     Zomma Priority/Fit/Segment/RPA-capable — plus inputs, for inspection."""
-    has_email = master["contact_email"].notna() & (master["contact_email"].astype(str) != "")
-
-    g = master.groupby("cert_number")
-    firms = g.first().reset_index()
-    firms["n_contacts"] = g.apply(lambda d: int(has_email.loc[d.index].sum())).values
-    firms["n_named"] = g.apply(
-        lambda d: int((d["contact_name"].notna() & has_email.loc[d.index]).sum())
-    ).values
+    firms = contact_scores(master, "cert_number")
 
     asset = pd.to_numeric(firms["asset_total"], errors="coerce")
     offices = pd.to_numeric(firms["offices"], errors="coerce").fillna(1).clip(lower=1)
@@ -78,9 +71,7 @@ def compute(master: pd.DataFrame) -> pd.DataFrame:
     # 2) Size fit — smaller assets are better.
     firms["s_size"] = _log_smallness(asset.fillna(ASSET_HI), ASSET_LO, ASSET_HI)
 
-    # 3) Contact richness — more, and named, contacts = more reachable.
-    firms["s_contact"] = (0.7 * np.minimum(firms["n_contacts"], 5) / 5
-                          + 0.3 * np.minimum(firms["n_named"], 3) / 3)
+    # 3) Contact richness (s_contact) — computed in contact_scores() above.
 
     # 4) Ops thinness — small assets-per-branch = more manual overhead per dollar.
     per_branch = (asset / offices).replace([np.inf, -np.inf], np.nan)

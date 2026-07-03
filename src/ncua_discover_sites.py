@@ -29,6 +29,7 @@ from tqdm.asyncio import tqdm as atqdm
 
 import config
 from config import CreditUnionICP, DEFAULT_CU_ICP
+from src.scrape_websites import _fetch_robots
 from src.utils import domain_of, get_logger
 
 log = get_logger("ncua_discover_sites", config.SCRAPE_LOG)
@@ -115,6 +116,13 @@ async def _resolve_one(client: httpx.AsyncClient, sem: asyncio.Semaphore,
         return Discovery(cu_number, None, None, "no_candidates")
     async with sem:
         for dom in candidates:
+            # These are name-derived guesses, so many candidates belong to
+            # unrelated sites — honor each candidate's robots.txt before probing
+            # (same politeness guarantee as every other fetcher in the repo).
+            rp = await _fetch_robots(client, dom)
+            if not rp.can_fetch(config.ROBOTS_UA, f"https://{dom}/"):
+                log.debug("robots disallow / on %s — skipping candidate", dom)
+                continue
             for scheme in ("https", "http"):
                 url = f"{scheme}://{dom}/"
                 try:
